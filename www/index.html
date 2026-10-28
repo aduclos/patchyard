@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Patching</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%233b6fe0'/><path d='M9 17l4.5 4.5L23 11' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="app" id="app">
+
+  <!-- ===== sidebar ===== -->
+  <aside class="side">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"></span>
+      <div><h1 id="site-name">Fleet patching</h1><p id="checked">Loading…</p></div>
+    </div>
+
+    <div class="side-btns">
+      <button class="btn" id="btn-refresh" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
+        Refresh
+      </button>
+      <button class="btn ghost" id="btn-enroll" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        Add machine
+      </button>
+    </div>
+
+    <nav class="nav" id="nav" aria-label="Filter machines">
+      <p class="side-h">Machines</p>
+      <button type="button" class="nav-item on" data-filter="all"><span class="ni-dot"></span>All machines<span class="ni-n" data-count="all"></span></button>
+      <button type="button" class="nav-item" data-filter="attention" style="--c:var(--fail)"><span class="ni-dot"></span>Need attention<span class="ni-n" data-count="attention"></span></button>
+      <button type="button" class="nav-item" data-filter="reboot" style="--c:var(--reboot)"><span class="ni-dot"></span>Reboot waiting<span class="ni-n" data-count="reboot"></span></button>
+      <button type="button" class="nav-item" data-filter="ok" style="--c:var(--ok)"><span class="ni-dot"></span>Up to date<span class="ni-n" data-count="ok"></span></button>
+    </nav>
+
+    <div class="side-jobs">
+      <p class="side-h">Activity</p>
+      <div id="joblist"><p class="side-empty">No jobs yet.</p></div>
+    </div>
+
+    <div class="side-foot">
+      <span class="console-state" id="console-state"><span class="dot"></span><span class="label">connecting</span></span>
+      <span class="who-wrap"><span id="who"></span>
+        <button class="btn sm link" id="btn-settings" type="button">Settings</button>
+        <button class="btn sm link" id="btn-logout" type="button">Sign out</button></span>
+    </div>
+  </aside>
+
+  <!-- ===== main: top (machines) / splitter / bottom (terminal) ===== -->
+  <main class="main" id="main">
+    <section class="pane top-pane" aria-labelledby="view-title">
+      <header class="pane-head">
+        <div class="view">
+          <h2 id="view-title">All machines</h2>
+          <span class="muted" id="view-sub"></span>
+        </div>
+        <div class="bulk" id="bulk" hidden>
+          <span class="bulk-n" id="selcount"></span>
+          <button class="btn sm" type="button" data-bulk="patch">Patch</button>
+          <button class="btn sm" type="button" data-bulk="reboot">Reboot</button>
+          <button class="btn sm ghost" type="button" data-bulk="auto-updates">Apply auto-update policy</button>
+          <button class="btn sm link" type="button" id="sel-clear">Clear</button>
+        </div>
+      </header>
+      <div class="table-scroll">
+        <div class="table" role="table" aria-label="Machines">
+          <div class="tr th" role="row">
+            <span class="c-sel"><input type="checkbox" id="sel-all" aria-label="Select all"></span>
+            <span class="c-host">Machine</span>
+            <span class="c-status">Status</span>
+            <span class="c-upd">Auto-updates</span>
+            <span class="c-pend">Pending</span>
+            <span class="c-up">Uptime</span>
+            <span class="c-act"><span class="sr">Actions</span></span>
+          </div>
+          <div id="rows"></div>
+        </div>
+        <p class="hint">Machines install updates by themselves every morning. Nothing reboots unless you press Reboot.</p>
+      </div>
+    </section>
+
+    <div class="splitter" id="splitter" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" tabindex="0"></div>
+
+    <section class="pane term" id="term" aria-label="Terminal">
+      <header class="term-head">
+        <div class="tabs" id="tabs" role="tablist"></div>
+        <div class="term-tools">
+          <label class="tool-check"><input type="checkbox" id="wrap" checked> Wrap</label>
+          <button class="icon" type="button" id="term-max" title="Maximize terminal" aria-label="Maximize terminal">
+            <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+          <button class="icon" type="button" id="term-min" title="Collapse terminal" aria-label="Collapse terminal">
+            <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></button>
+        </div>
+      </header>
+      <pre class="log wrap" id="log" tabindex="0"></pre>
+    </section>
+  </main>
+</div>
+
+<dialog id="dlg">
+  <form method="dialog" id="dlg-form">
+    <h3 id="dlg-title"></h3>
+    <div class="dlg-desc" id="dlg-desc"></div>
+    <div id="dlg-opts"></div>
+    <label class="field" id="f-pw" hidden><span>Password</span>
+      <input type="password" id="dlg-pw" autocomplete="current-password"></label>
+    <label class="field" id="f-confirm" hidden><span>Type <b>yes</b> to confirm</span>
+      <input type="text" id="dlg-confirm" autocomplete="off" spellcheck="false"></label>
+    <p class="err" id="dlg-err" role="alert"></p>
+    <div class="dlg-btns">
+      <button class="btn ghost" type="button" id="dlg-cancel">Cancel</button>
+      <button class="btn" id="dlg-ok" type="submit">Run</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

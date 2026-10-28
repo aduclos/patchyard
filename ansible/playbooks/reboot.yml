@@ -1,0 +1,48 @@
+# Reboot managed machines one at a time and wait for their containers to return.
+#   ansible-playbook reboot.yml --limit web1
+#   ... -e ignore_blackout=true     reboot even inside the machine's fleet_reboot_blackout
+# Engine variables: fleet_managed_group, fleet_controller (never rebooted here).
+- name: Reboot managed machines
+  hosts: "{{ fleet_managed_group | default('managed') }}"
+  serial: 1
+  order: inventory
+  max_fail_percentage: 0
+  become: true
+  tasks:
+    - name: Never the controller
+      ansible.builtin.assert:
+        that: inventory_hostname != (fleet_controller | default(''))
+        fail_msg: "{{ inventory_hostname }} runs the fleet tool; reboot it from its own console"
+
+    - name: Outside the reboot blackout (unless overridden)
+      vars:
+        hours: "{{ (fleet_reboot_blackout | default({})).hours_utc | default([]) }}"
+      ansible.builtin.assert:
+        that: (ignore_blackout | default(false) | bool) or (now(utc=true).hour | int) not in hours
+        fail_msg: >-
+          {{ inventory_hostname }} is in its reboot blackout (UTC hours {{ hours }}:
+          {{ fleet_reboot_blackout.reason | default('no reason given') }}); override to reboot anyway
+
+    - name: Containers running before
+      ansible.builtin.shell: >-
+        command -v docker >/dev/null && docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort || true
+      register: before
+      changed_when: false
+
+    - name: Reboot
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        msg: "Reboot requested from ansiblefleet"
+
+    - name: Wait for containers to come back
+      when: before.stdout | length > 0
+      ansible.builtin.shell: docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort
+      register: after
+      until: (before.stdout_lines | difference(after.stdout_lines)) | length == 0
+      retries: 20
+      delay: 30
+      changed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "rebooted | containers back: {{ before.stdout_lines | length }}"

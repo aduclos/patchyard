@@ -1,0 +1,265 @@
+# Install (or update) the ansiblefleet controller on the machine you run this on.
+#
+#   sudo ansible-playbook install/controller.yml                   # defaults below
+#   sudo ansible-playbook install/controller.yml -e fleet_account=svc_fleet -e fleet_web_bind=192.0.2.5
+#
+# Idempotent. Creates:
+#   * system group {{ fleet_group }} and system user {{ fleet_account }} (no password, no login shell)
+#   * its SSH key ~{{ fleet_account }}/.ssh/fleet_ed25519 and an ssh config that uses the state
+#     directory's known_hosts/config (shared with the web service and Ansible)
+#   * {{ fleet_state }} (inventory, host_vars, logs, data) owned by the service account
+#   * the Ansible virtualenv and collections inside the code directory
+#   * {{ fleet_config }} from config/fleet.example.toml, ONLY if it does not exist
+#   * systemd units: ansiblefleet-web.service, ansiblefleet-check.service + .timer
+#   * optionally a sudo rule letting the service account reboot this machine (fleet_controller_reboot)
+# Then edit {{ fleet_config }}, put machines in {{ fleet_state }}/inventory.ini (or use
+# "Add machine" in the web UI), and: systemctl enable --now ansiblefleet-web ansiblefleet-check.timer
+- name: Install the ansiblefleet controller
+  hosts: localhost
+  connection: local
+  become: true
+  vars:
+    fleet_code: "{{ playbook_dir | dirname }}"          # this repository
+    fleet_state: /var/lib/ansiblefleet
+    fleet_config: /etc/ansiblefleet/fleet.toml
+    fleet_account: svc_fleet
+    fleet_group: fleet
+    fleet_admins: []                                     # local users who may read/edit state (added to fleet_group)
+    fleet_controller_reboot: false                       # sudo rule for the controller reboot button
+    fleet_python: /usr/bin/python3
+    fleet_home: "/home/{{ fleet_account }}"
+  tasks:
+    - name: Python 3.11+ (tomllib)
+      ansible.builtin.command: "{{ fleet_python }} -c 'import sys; assert sys.version_info >= (3, 11)'"
+      changed_when: false
+
+    - name: Group
+      ansible.builtin.group:
+        name: "{{ fleet_group }}"
+        system: true
+
+    - name: Service account
+      ansible.builtin.user:
+        name: "{{ fleet_account }}"
+        system: true
+        home: "{{ fleet_home }}"
+        create_home: true
+        shell: /sbin/nologin
+        password: "*"
+        groups: "{{ fleet_group }}"
+        append: true
+        comment: ansiblefleet service account
+
+    - name: Admins may read and edit the state
+      ansible.builtin.user:
+        name: "{{ item }}"
+        groups: "{{ fleet_group }}"
+        append: true
+      loop: "{{ fleet_admins }}"
+
+    - name: Home and ~/.ssh are private
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ fleet_account }}"
+        group: "{{ fleet_account }}"
+        mode: "0700"
+      loop: ["{{ fleet_home }}", "{{ fleet_home }}/.ssh"]
+
+    - name: SSH key
+      become_user: "{{ fleet_account }}"
+      ansible.builtin.command:
+        cmd: ssh-keygen -q -t ed25519 -N '' -C "{{ fleet_account }}@{{ ansible_facts['hostname'] | default('controller') }}" -f {{ fleet_home }}/.ssh/fleet_ed25519
+        creates: "{{ fleet_home }}/.ssh/fleet_ed25519"
+
+    - name: State directories
+      ansible.builtin.file:
+        path: "{{ fleet_state }}/{{ item.path }}"
+        state: directory
+        owner: "{{ fleet_account }}"
+        group: "{{ fleet_group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - {path: "", mode: "2770"}
+        - {path: logs, mode: "2770"}
+        - {path: host_vars, mode: "2770"}
+        - {path: group_vars, mode: "2770"}
+        - {path: ssh, mode: "2770"}
+        - {path: www, mode: "2775"}            # the web data must be readable by any web server
+
+    - name: Shared known_hosts (group-writable so admins can record host keys)
+      ansible.builtin.copy:
+        dest: "{{ fleet_state }}/ssh/known_hosts"
+        content: ""
+        force: false
+        owner: "{{ fleet_account }}"
+        group: "{{ fleet_group }}"
+        mode: "0664"
+
+    - name: Per-machine ssh settings (ssh refuses an included config others can write)
+      ansible.builtin.copy:
+        dest: "{{ fleet_state }}/ssh/config"
+        content: "# Machine-specific ssh settings for the service account (Host / HostName blocks).\n"
+        force: false
+        owner: "{{ fleet_account }}"
+        group: "{{ fleet_group }}"
+        mode: "0644"
+
+    - name: Service account ssh config
+      ansible.builtin.copy:
+        dest: "{{ fleet_home }}/.ssh/config"
+        owner: "{{ fleet_account }}"
+        group: "{{ fleet_account }}"
+        mode: "0600"
+        content: |
+          # Written by ansiblefleet install/controller.yml.
+          Include {{ fleet_state }}/ssh/config
+          Host *
+            UserKnownHostsFile {{ fleet_state }}/ssh/known_hosts
+            StrictHostKeyChecking yes
+            IdentityFile {{ fleet_home }}/.ssh/fleet_ed25519
+            IdentitiesOnly yes
+            # IPv4 keeps the key's from= restriction meaningful when IPv6 privacy addresses rotate;
+            # match service_account.address_family in the site configuration.
+            AddressFamily inet
+
+    - name: Starter inventory (only if none exists)
+      ansible.builtin.copy:
+        dest: "{{ fleet_state }}/inventory.ini"
+        force: false
+        owner: "{{ fleet_account }}"
+        group: "{{ fleet_group }}"
+        mode: "0664"
+        content: |
+          # Machines the tool manages. "Add machine" in the web UI appends here.
+          [managed]
+
+          # Shown on the dashboard, never changed.
+          [report_only]
+
+          [managed:vars]
+          ansible_user={{ fleet_account }}
+          ansible_ssh_private_key_file={{ fleet_home }}/.ssh/fleet_ed25519
+
+    - name: Ansible virtualenv
+      ansible.builtin.pip:
+        requirements: "{{ fleet_code }}/ansible/requirements.txt"
+        virtualenv: "{{ fleet_code }}/ansible/.venv"
+        virtualenv_command: "{{ fleet_python }} -m venv"
+
+    - name: Ansible collections
+      ansible.builtin.command:
+        cmd: >-
+          {{ fleet_code }}/ansible/.venv/bin/ansible-galaxy collection install
+          -r {{ fleet_code }}/ansible/requirements.yml -p {{ fleet_code }}/ansible/collections
+        creates: "{{ fleet_code }}/ansible/collections/ansible_collections"
+
+    - name: Code is readable by the service account
+      ansible.builtin.file:
+        path: "{{ fleet_code }}"
+        mode: "o+rX"
+        recurse: true
+
+    - name: Config directory
+      ansible.builtin.file:
+        path: "{{ fleet_config | dirname }}"
+        state: directory
+        owner: root
+        group: "{{ fleet_group }}"
+        mode: "0750"
+
+    - name: Site configuration from the example (never overwritten)
+      ansible.builtin.copy:
+        src: "{{ fleet_code }}/config/fleet.example.toml"
+        dest: "{{ fleet_config }}"
+        force: false
+        owner: root
+        group: "{{ fleet_group }}"
+        mode: "0640"
+      register: new_config
+
+    - name: Point the site configuration at this install (first install only)
+      when: new_config.changed
+      ansible.builtin.replace:
+        path: "{{ fleet_config }}"
+        regexp: '{{ item.re }}'
+        replace: '{{ item.to }}'
+      loop:
+        - {re: '^code = .*', to: 'code = "{{ fleet_code }}"'}
+        - {re: '^state = .*', to: 'state = "{{ fleet_state }}"'}
+        - {re: '^name = "svc_patch"', to: 'name = "{{ fleet_account }}"'}
+
+    - name: Controller reboot rule (optional)
+      ansible.builtin.copy:
+        dest: /etc/sudoers.d/ansiblefleet-controller
+        mode: "0440"
+        validate: visudo -cf %s
+        content: |
+          # ansiblefleet: the service account may reboot this machine, nothing else.
+          {{ fleet_account }} ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
+      when: fleet_controller_reboot | bool
+
+    - name: systemd units
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ item.name }}"
+        mode: "0644"
+        content: "{{ item.content }}"
+      loop:
+        - name: ansiblefleet-web.service
+          content: |
+            [Unit]
+            Description=ansiblefleet web app and API
+            After=network-online.target
+            Wants=network-online.target
+
+            [Service]
+            User={{ fleet_account }}
+            Group={{ fleet_group }}
+            UMask=0007
+            Environment=FLEET_CONFIG={{ fleet_config }} HOME={{ fleet_home }}
+            WorkingDirectory={{ fleet_code }}
+            # Started via the interpreter: SELinux may not allow systemd to exec scripts in the code dir.
+            ExecStart={{ fleet_python }} -m fleet web
+            Restart=on-failure
+            RestartSec=10
+
+            [Install]
+            WantedBy=multi-user.target
+        - name: ansiblefleet-check.service
+          content: |
+            [Unit]
+            Description=ansiblefleet status check (dashboard data + alerts)
+
+            [Service]
+            Type=oneshot
+            User={{ fleet_account }}
+            Group={{ fleet_group }}
+            UMask=0007
+            Environment=FLEET_CONFIG={{ fleet_config }} HOME={{ fleet_home }}
+            WorkingDirectory={{ fleet_code }}
+            ExecStart={{ fleet_python }} -m fleet check --if-due
+        - name: ansiblefleet-check.timer
+          content: |
+            [Unit]
+            Description=ansiblefleet status check every 5 min (the real interval is checks.interval_minutes)
+
+            [Timer]
+            OnBootSec=4min
+            OnUnitActiveSec=5min
+
+            [Install]
+            WantedBy=timers.target
+      notify: reload systemd
+
+    - name: Next steps
+      ansible.builtin.debug:
+        msg:
+          - "Service account key: {{ fleet_home }}/.ssh/fleet_ed25519.pub"
+          - "1. Edit {{ fleet_config }} (site.url, auth, notify, controller.host)"
+          - "2. Check it: sudo -u {{ fleet_account }} env FLEET_CONFIG={{ fleet_config }} {{ fleet_python }} -m fleet config"
+          - "3. systemctl enable --now ansiblefleet-web.service ansiblefleet-check.timer"
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true

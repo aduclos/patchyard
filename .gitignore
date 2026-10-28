@@ -1,0 +1,7 @@
+# Generated / installed, not source
+ansible/.venv/
+ansible/collections/
+__pycache__/
+*.pyc
+www/data/
+.venv-dev/

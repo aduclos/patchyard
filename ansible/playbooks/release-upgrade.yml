@@ -1,0 +1,162 @@
+# Ubuntu release upgrades (e.g. 24.04 -> 26.04) without a terminal.
+#   -e mode=start   upgrade non-interactively; never reboots
+#   -e mode=cancel  stop a running/stuck upgrader and restore the old apt sources
+# One machine per run (--limit). Used by the dashboard; by hand:
+#   ansible-playbook release-upgrade.yml --limit web1 -e mode=cancel
+#
+# start: brings the current release fully up to date (the upgrader insists),
+# then launches do-release-upgrade -f DistUpgradeViewNonInteractive as a
+# transient systemd unit "fleet-release-upgrade", so it survives SSH drops and
+# the dashboard restarting. Output: /var/log/fleet-release-upgrade.log (0644,
+# readable without sudo; the dashboard streams it). Non-interactive mode keeps
+# existing config files (confold) and does NOT reboot.
+#
+# Inventory variable: fleet_release_upgrade_reenable (default ["docker"]): .sources files
+# under /etc/apt/sources.list.d to re-enable for the new release afterwards.
+#
+# cancel: the upgrader saves every apt source it rewrites as <file>.distUpgrade;
+# before it starts installing, putting those back undoes everything it did.
+- name: Release upgrade
+  hosts: "{{ fleet_managed_group | default('managed') }}"
+  become: true
+  gather_facts: true
+  vars:
+    log: /var/log/fleet-release-upgrade.log
+  tasks:
+    - name: Sanity
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname != (fleet_controller | default(''))
+          - ansible_facts['distribution'] == 'Ubuntu'
+          - ansible_play_hosts_all | length == 1
+          - mode | default('') in ['start', 'cancel']
+        fail_msg: one Ubuntu machine per run, -e mode=start|cancel; never the controller
+
+    # ---------------------------------------------------------------- cancel
+    - name: Cancel
+      when: mode == 'cancel'
+      block:
+        - name: dpkg must not be mid-install (then cancelling is no longer safe)
+          ansible.builtin.shell: |
+            if pgrep -x dpkg >/dev/null || pgrep -x apt-get >/dev/null; then
+              echo "packages are being installed: too late to cancel safely; let it finish"; exit 1; fi
+            echo "last dpkg step: $(tail -1 /var/log/dpkg.log)"
+          register: dpkg_check
+          changed_when: false
+
+        - name: Stop the upgrader (and its rescue sshd on port 1022)
+          ansible.builtin.shell: |
+            systemctl stop fleet-release-upgrade 2>/dev/null || true
+            pkill -TERM -f 'ubuntu-release-upgrade[r]-' && sleep 5
+            pkill -KILL -f 'ubuntu-release-upgrade[r]-' || true
+            [ -f /var/run/release-upgrader-sshd.pid ] && kill "$(cat /var/run/release-upgrader-sshd.pid)" 2>/dev/null || true
+            pgrep -f 'ubuntu-release-upgrade[r]-' && { echo "upgrader still running"; exit 1; } || echo "upgrader stopped"
+          register: stop
+
+        - name: Restore the apt sources the upgrader rewrote
+          ansible.builtin.shell: |
+            set -e
+            n=0
+            for b in /etc/apt/sources.list.distUpgrade /etc/apt/sources.list.d/*.distUpgrade; do
+              [ -e "$b" ] || continue
+              f="${b%.distUpgrade}"
+              [ -e "$f" ] && cp -p "$f" "$f.fleet-cancelled-$(date +%Y%m%d%H%M)"
+              mv "$b" "$f"; n=$((n+1)); echo "restored $f"
+            done
+            echo "$n file(s) restored"
+          register: restore
+
+        - name: Finish any half-configured packages, refresh lists
+          ansible.builtin.shell: |
+            dpkg --configure -a
+            apt-get update -q 2>&1 | tail -3
+            . /etc/os-release
+            echo "sources now: $(grep -h '^Suites:' /etc/apt/sources.list.d/*.sources 2>/dev/null | sort -u | paste -sd' ')"
+            echo "pending on $VERSION_CODENAME: $(apt-get -s dist-upgrade 2>/dev/null | grep -c '^Inst')"
+          register: after
+
+        - name: Result
+          ansible.builtin.debug:
+            msg: "{{ dpkg_check.stdout_lines + stop.stdout_lines + restore.stdout_lines + after.stdout_lines }}"
+
+    # ----------------------------------------------------------------- start
+    - name: Start
+      when: mode == 'start'
+      block:
+        - name: Not already upgrading, sources still on the current release
+          ansible.builtin.shell: |
+            . /etc/os-release
+            if pgrep -f 'ubuntu-release-upgrade[r]-' >/dev/null || systemctl is-active -q fleet-release-upgrade; then
+              echo "a release upgrade is already running here (cancel it first)"; exit 1; fi
+            grep -qh "^Suites:.*\b$VERSION_CODENAME\b" /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null ||
+              grep -q "^deb .* $VERSION_CODENAME " /etc/apt/sources.list ||
+              { echo "apt sources are not on $VERSION_CODENAME (a cancelled upgrade left them rewritten?): run Cancel upgrade first"; exit 1; }
+            echo "on $PRETTY_NAME"
+          changed_when: false
+
+        - name: Is a new release offered?
+          ansible.builtin.shell: do-release-upgrade -c 2>&1 | tail -2
+          register: offer
+          changed_when: false
+          failed_when: "'New release' not in offer.stdout"
+
+        - name: Bring the current release fully up to date first (the upgrader requires it)
+          ansible.builtin.apt:
+            update_cache: true
+            upgrade: dist
+            autoremove: true
+
+        - name: Enough space on / and /boot
+          ansible.builtin.shell: |
+            r=$(df --output=avail -m / | tail -1); b=$(df --output=avail -m /boot | tail -1)
+            echo "free: / ${r} MiB, /boot ${b} MiB"
+            [ "$r" -gt 10240 ] && [ "$b" -gt 300 ]
+          changed_when: false
+
+        # A script file, not "bash -c '...'": systemd expands $VARS in a
+        # unit's command line itself, which would blank $rc and friends.
+        - name: Upgrade wrapper script
+          ansible.builtin.copy:
+            dest: /usr/local/sbin/fleet-release-upgrade-run
+            mode: "0755"
+            content: |
+              #!/bin/bash
+              # Run by the transient unit fleet-release-upgrade (ansiblefleet playbooks/release-upgrade.yml).
+              echo "=== $(date -Is) do-release-upgrade (non-interactive) started"
+              do-release-upgrade -f DistUpgradeViewNonInteractive; rc=$?
+              echo "=== $(date -Is) do-release-upgrade exited rc=$rc"
+              # Third-party sources the upgrader disabled, to re-enable for the new release
+              # (inventory: fleet_release_upgrade_reenable, default ["docker"]).
+              reenable() {   # reenable <name>: /etc/apt/sources.list.d/<name>.sources
+                local f=/etc/apt/sources.list.d/$1.sources
+                [ -f "$f" ] || return 0
+                . /etc/os-release
+                cp -p "$f" "/root/$1.sources.pre-reenable"
+                sed -i -e "s/^Suites:.*/Suites: $VERSION_CODENAME/" -e "/^Enabled: no/d" "$f"
+                if apt-get update -q >/dev/null 2>&1; then echo "=== $1 repo re-enabled for $VERSION_CODENAME"
+                else cp -p "/root/$1.sources.pre-reenable" "$f"
+                     echo "=== $1 repo has no $VERSION_CODENAME suite yet; left disabled"; fi
+              }
+              if [ $rc -eq 0 ]; then
+              {% for src in fleet_release_upgrade_reenable | default(['docker']) %}
+                reenable {{ src | quote }}
+              {% endfor %}
+                :
+              fi
+              [ -e /var/run/reboot-required ] && echo "=== REBOOT REQUIRED to finish the upgrade (not done automatically)"
+              exit $rc
+
+        - name: Launch the upgrade as a transient unit (survives SSH drops; never reboots)
+          ansible.builtin.shell: |
+            install -m 0644 /dev/null {{ log }}
+            systemctl reset-failed fleet-release-upgrade 2>/dev/null || true
+            systemd-run --unit=fleet-release-upgrade --description="Release upgrade (ansiblefleet)" \
+              --setenv=DEBIAN_FRONTEND=noninteractive --property=KillMode=process \
+              --property=StandardOutput=append:{{ log }} --property=StandardError=append:{{ log }} \
+              /usr/local/sbin/fleet-release-upgrade-run
+            sleep 3; systemctl is-active fleet-release-upgrade || tail -20 {{ log }}
+          register: launch
+
+        - name: Result
+          ansible.builtin.debug:
+            msg: "{{ offer.stdout_lines + launch.stdout_lines }}"

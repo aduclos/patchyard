@@ -1,0 +1,101 @@
+# Install pending updates on managed machines, one at a time. Reboot only if the
+# OS asks for it AND reboot_ok is true AND the machine is outside its reboot
+# blackout. The first failure stops the run, so a bad update hits one machine.
+#
+#   ansible-playbook patch.yml                      every managed machine
+#   ansible-playbook patch.yml --limit web1         one machine
+#   ... -e reboot_ok=false                          patch, never reboot
+#   ... -e fleet_explicit=true                      include fleet_manual_only machines
+#                                                   (the web UI sets this: picking a
+#                                                   machine by name IS the opt-in)
+#
+# Inventory variables (see fleet/policy.py): fleet_manual_only, fleet_reboot_blackout.
+# Engine variables: fleet_managed_group, fleet_controller.
+- name: Patch managed machines
+  hosts: "{{ fleet_managed_group | default('managed') }}"
+  serial: 1
+  order: inventory
+  max_fail_percentage: 0
+  become: true
+  vars:
+    reboot_ok: true
+  tasks:
+    - name: Never the controller
+      ansible.builtin.assert:
+        that: inventory_hostname != (fleet_controller | default(''))
+        fail_msg: "{{ inventory_hostname }} runs the fleet tool; it is not patched by it"
+
+    - name: Skip manual-only machines unless picked by name
+      when:
+        - fleet_manual_only is defined and fleet_manual_only is not false
+        - not (fleet_explicit | default(false) | bool)
+      block:
+        - name: Manual-only machine skipped
+          ansible.builtin.debug:
+            msg: >-
+              SKIPPED (manual only: {{ fleet_manual_only.reason | default('no reason given')
+              if fleet_manual_only is mapping else 'set in inventory' }}); pick it by name to patch it
+        - name: End host
+          ansible.builtin.meta: end_host
+
+    - name: Containers running before
+      ansible.builtin.shell: >-
+        command -v docker >/dev/null && docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort || true
+      register: before
+      changed_when: false
+      check_mode: false
+
+    - name: Upgrade packages (apt)
+      when: ansible_facts['pkg_mgr'] == 'apt'
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        autoremove: true
+      register: upgrade_apt
+
+    - name: Upgrade packages (dnf)
+      when: ansible_facts['pkg_mgr'] in ['dnf', 'dnf5']
+      ansible.builtin.dnf:
+        name: "*"
+        state: latest
+      register: upgrade_dnf
+
+    - name: Reboot required?
+      ansible.builtin.shell: |
+        if [ -e /var/run/reboot-required ]; then echo yes
+        elif command -v dnf >/dev/null && ! dnf needs-restarting -r >/dev/null 2>&1; then echo yes
+        else echo no; fi
+      register: reboot_flag
+      changed_when: false
+
+    - name: Inside the reboot blackout?
+      ansible.builtin.set_fact:
+        blackout: >-
+          {{ (now(utc=true).hour | int) in
+             ((fleet_reboot_blackout | default({})).hours_utc | default([])) }}
+
+    - name: Reboot
+      when: reboot_flag.stdout == 'yes' and reboot_ok | bool and not blackout | bool
+      ansible.builtin.reboot:
+        reboot_timeout: 900
+        msg: "Reboot after patching (ansiblefleet)"
+
+    - name: Wait for containers to come back
+      when: before.stdout | length > 0
+      ansible.builtin.shell: docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort
+      register: after
+      until: (before.stdout_lines | difference(after.stdout_lines)) | length == 0
+      retries: 20
+      delay: 30
+      changed_when: false
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: >-
+          upgraded={{ (upgrade_apt.changed | default(false)) or (upgrade_dnf.changed | default(false)) }} |
+          reboot_needed={{ reboot_flag.stdout }} |
+          {{ ('REBOOT DEFERRED (blackout: ' ~ fleet_reboot_blackout.reason | default('') ~ ')')
+             if (reboot_flag.stdout == 'yes' and blackout | bool)
+             else 'REBOOT SKIPPED (reboot_ok=false)' if (reboot_flag.stdout == 'yes' and not reboot_ok | bool)
+             else 'rebooted' if reboot_flag.stdout == 'yes' else 'no reboot' }} |
+          containers back: {{ before.stdout_lines | length }}

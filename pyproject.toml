@@ -1,0 +1,21 @@
+[project]
+name = "ansiblefleet"
+dynamic = ["version"]
+description = "Keep a fleet of machines updated with Ansible; reboots stay a person's call."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"          # tomllib
+dependencies = []                   # standard library only; Ansible runs in its own venv
+
+[project.optional-dependencies]
+dev = ["ruff==0.14.0"]
+
+[tool.setuptools.dynamic]
+version = { attr = "fleet.__version__" }
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

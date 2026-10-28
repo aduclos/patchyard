@@ -1,0 +1,2 @@
+# Python packages for the Ansible virtualenv (ansible/.venv).
+ansible-core==2.21.5

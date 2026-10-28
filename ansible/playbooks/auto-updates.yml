@@ -1,0 +1,88 @@
+# Make managed Debian/Ubuntu machines install ALL normal updates by themselves
+# every morning (not just security updates), and NEVER reboot automatically.
+# Rebooting stays a person's call; the dashboard shows who is waiting for one.
+#
+#   ansible-playbook auto-updates.yml                 every managed machine
+#   ansible-playbook auto-updates.yml --limit web1    one machine
+# Idempotent: re-run after adding a machine or changing its policy.
+#
+# Inventory variables (all optional):
+#   fleet_hold_packages:              packages automatic updates must never install
+#     packages: ["postgresql-", "libpq"]
+#     reason: "..."
+#   fleet_auto_update_extra_origins:  extra unattended-upgrades Origins-Pattern entries,
+#     e.g. ["origin=Docker,codename=${distro_codename}"] to include Docker CE.
+# Engine variables: fleet_managed_group.
+- name: Unattended upgrades, no reboots
+  hosts: "{{ fleet_managed_group | default('managed') }}"
+  become: true
+  # Per-machine values come from inventory. Do not add play-level "vars:" for them:
+  # play vars outrank host_vars and would silently blank them.
+  tasks:
+    - name: Debian/Ubuntu only
+      ansible.builtin.meta: end_host
+      when: ansible_facts['pkg_mgr'] != 'apt'
+
+    - name: unattended-upgrades installed
+      ansible.builtin.apt:
+        name: unattended-upgrades
+        state: present
+
+    - name: Daily list refresh + upgrade
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        backup: true
+        mode: "0644"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::AutocleanInterval "7";
+
+    # apt config lists are additive, so this extends the stock
+    # 50unattended-upgrades (security only) instead of replacing it.
+    - name: Fleet policy (all updates, no reboot)
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/52fleet-auto-updates
+        backup: true
+        mode: "0644"
+        content: |
+          // Managed by ansiblefleet (playbooks/auto-updates.yml). Local edits are overwritten.
+          Unattended-Upgrade::Allowed-Origins {
+                  "${distro_id}:${distro_codename}-updates";
+                  "${distro_id}ESMApps:${distro_codename}-apps-updates";
+                  "${distro_id}ESM:${distro_codename}-infra-updates";
+          };
+          Unattended-Upgrade::Origins-Pattern {
+          {% for o in fleet_auto_update_extra_origins | default([]) %}
+                  "{{ o }}";
+          {% endfor %}
+          };
+          Unattended-Upgrade::Package-Blacklist {
+          {% for p in (fleet_hold_packages | default({})).packages | default([]) %}
+                  "{{ p }}";
+          {% endfor %}
+          };
+          Unattended-Upgrade::Automatic-Reboot "false";
+          Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+          Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+          Unattended-Upgrade::Remove-Unused-Dependencies "true";
+          // A half-configured dpkg would block every later run.
+          Dpkg::Options { "--force-confdef"; "--force-confold"; };
+
+    - name: Effective policy
+      ansible.builtin.shell: >-
+        apt-config dump | grep -E '^Unattended-Upgrade::(Allowed-Origins|Origins-Pattern|Package-Blacklist)::|Automatic-Reboot'
+        | sed 's/^Unattended-Upgrade:://'
+      register: effective
+      changed_when: false
+
+    - name: Timers on
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: [apt-daily.timer, apt-daily-upgrade.timer]
+
+    - name: Result
+      ansible.builtin.debug:
+        msg: "{{ effective.stdout_lines }}"

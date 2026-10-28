@@ -1,0 +1,92 @@
+# Read-only status of every machine in the inventory (no changes; sudo only for
+# listing containers). Writes <FLEET_STATE>/logs/status.json for the fleet check.
+# Run by the fleet check, not by hand.
+- name: Collect status
+  hosts: all
+  gather_facts: true
+  become: false
+  tasks:
+    - name: apt state
+      when: ansible_facts['pkg_mgr'] == 'apt'
+      ansible.builtin.shell: |
+        echo "pending=$(apt-get -s dist-upgrade 2>/dev/null | grep -c '^Inst')"
+        echo "pending_pkgs=$(apt-get -s dist-upgrade 2>/dev/null | awk '/^Inst/{print $2}' | head -80 | paste -sd' ')"
+        f=/var/run/reboot-required
+        [ -e $f ] && echo "reboot_since=$(stat -c %Y $f)" || echo "reboot_since="
+        echo "reboot_pkgs=$(sort -u $f.pkgs 2>/dev/null | head -5 | paste -sd' ')"
+        s=/var/lib/apt/periodic/upgrade-stamp
+        echo "uu_last=$([ -e $s ] && stat -c %Y $s)"
+        echo "uu_result=$(systemctl show -p Result --value apt-daily-upgrade.service)"
+        echo "uu_policy=$([ -e /etc/apt/apt.conf.d/52fleet-auto-updates ] && echo fleet || echo stock)"
+        echo "dpkg_audit=$(dpkg --audit 2>/dev/null | grep -c . )"
+        echo "release_upgrade=$(sed -n 's/^New release .\(.*\). available.*/\1/p' /var/lib/ubuntu-release-upgrader/release-upgrade-available 2>/dev/null)"
+        pgrep -f 'ubuntu-release-upgrade[r]-' >/dev/null && echo "release_upgrading=1" || echo "release_upgrading="
+        # Progress of a running release upgrade: newest write to its own log or to dpkg.log
+        echo "relup_activity=$(stat -c %Y /var/log/dist-upgrade/main.log /var/log/dpkg.log 2>/dev/null | sort -n | tail -1)"
+        echo "relup_last=$(tail -1 /var/log/dist-upgrade/main.log 2>/dev/null | cut -c1-200 | tr -d '=')"
+        echo "dpkg_last=$(tail -1 /var/log/dpkg.log 2>/dev/null | cut -c1-160 | tr -d '=')"
+      register: apt_state
+      changed_when: false
+
+    - name: dnf state
+      when: ansible_facts['pkg_mgr'] in ['dnf', 'dnf5']
+      ansible.builtin.shell: |
+        echo "pending=$(dnf -C -q check-upgrade 2>/dev/null | grep -c '\S')"
+        echo "pending_pkgs=$(dnf -C -q check-upgrade 2>/dev/null | awk 'NF{print $1}' | head -80 | paste -sd' ')"
+        if dnf needs-restarting -r >/dev/null 2>&1; then echo "reboot_since="
+        else echo "reboot_since=$(date -d "$(uptime -s)" +%s)"; fi
+        t=$(systemctl list-unit-files 'dnf*-automatic*.timer' --no-legend 2>/dev/null | awk '$2=="enabled"{print $1; exit}')
+        if [ -n "$t" ]; then
+          s=${t%.timer}.service
+          echo "uu_policy=dnf-automatic"
+          echo "uu_result=$(systemctl show -p Result --value "$s")"
+          echo "uu_last=$(date -d "$(systemctl show -p ExecMainExitTimestamp --value "$s")" +%s 2>/dev/null)"
+        else
+          echo "uu_policy=none"
+        fi
+      register: dnf_state
+      changed_when: false
+
+    # The service account is normally not in the docker group, so ask through
+    # sudo -n first (passwordless on managed machines) and fall back to a plain call.
+    - name: Containers running
+      ansible.builtin.shell: |
+        for e in docker podman; do
+          command -v $e >/dev/null || continue
+          { sudo -n $e ps --format '{% raw %}{{.Names}}{% endraw %}' 2>/dev/null ||
+            $e ps --format '{% raw %}{{.Names}}{% endraw %}' 2>/dev/null; }
+        done | sort -u
+      register: ctr
+      changed_when: false
+
+    - name: Status fact
+      ansible.builtin.set_fact:
+        st: >-
+          {{ dict((apt_state.stdout_lines | default([]) + dnf_state.stdout_lines | default([]))
+                  | map('split', '=', 1) | list)
+             | combine({'os': ansible_facts['distribution'] ~ ' ' ~ ansible_facts['distribution_version'],
+                        'uptime_s': ansible_facts['uptime_seconds'],
+                        'containers': ctr.stdout_lines,
+                        'policy_vars': {
+                          'fleet_reboot_blackout': fleet_reboot_blackout | default(omit),
+                          'fleet_manual_only': fleet_manual_only | default(omit),
+                          'fleet_hold_packages': fleet_hold_packages | default(omit),
+                          'fleet_track_containers': fleet_track_containers | default(omit)},
+                        'groups': group_names}) }}
+
+- name: Write logs/status.json
+  hosts: localhost
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Write
+      ansible.builtin.copy:
+        dest: "{{ lookup('env', 'FLEET_STATE') | default('/var/lib/fleet', true) }}/logs/status.json"
+        mode: "0600"
+        content: >-
+          {{ dict(groups['all'] | map('extract', hostvars) | selectattr('st', 'defined')
+                  | map(attribute='inventory_hostname')
+                  | zip(groups['all'] | map('extract', hostvars) | selectattr('st', 'defined')
+                        | map(attribute='st')))
+             | combine({'_all': groups['all'] | reject('equalto', 'localhost') | list,
+                        '_time': lookup('pipe', 'date +%s') | int}) | to_nice_json }}
