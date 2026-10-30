@@ -52,6 +52,21 @@ def _write(path: Path, lines: list[str], tag: str) -> Path:
     return backup
 
 
+def all_hosts(path: Path) -> list[str]:
+    """Every host named in a host section (not :vars or :children), in file order."""
+    out: list[str] = []
+    in_hosts = True                      # lines before the first header are ungrouped hosts
+    for line in path.read_text().split("\n"):
+        t = line.strip()
+        if t.startswith("["):
+            in_hosts = not t.rstrip("]").endswith((":vars", ":children"))
+        elif t and in_hosts and not t.startswith(("#", ";")):
+            name = t.split()[0]
+            if name not in out:
+                out.append(name)
+    return out
+
+
 def add(path: Path, group: str, host: str) -> Path:
     """Append `host` to `group` (after its last non-blank line). Returns the backup path."""
     if not valid_host(host):

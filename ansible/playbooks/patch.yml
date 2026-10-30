@@ -1,18 +1,21 @@
-# Install pending updates on managed machines, one at a time. Reboot only if the
+# Install pending updates on managed machines (Linux, BSD, Windows), one at a time. Reboot only if the
 # OS asks for it AND reboot_ok is true AND the machine is outside its reboot
 # blackout. The first failure stops the run, so a bad update hits one machine.
 #
 #   ansible-playbook patch.yml                      every managed machine
 #   ansible-playbook patch.yml --limit web1         one machine
 #   ... -e reboot_ok=false                          patch, never reboot
-#   ... -e fleet_explicit=true                      include fleet_manual_only machines
+#   ... -e patchyard_explicit=true                      include patchyard_manual_only machines
 #                                                   (the web UI sets this: picking a
 #                                                   machine by name IS the opt-in)
 #
-# Inventory variables (see fleet/policy.py): fleet_manual_only, fleet_reboot_blackout.
-# Engine variables: fleet_managed_group, fleet_controller.
+# Inventory variables (see patchyard/policy.py): patchyard_manual_only, patchyard_reboot_blackout.
+# patchyard_windows_update_categories: Windows Update categories to install (default below:
+# fixes, security and definitions; never feature upgrades or drivers, the Windows
+# counterparts of a release upgrade and firmware).
+# Engine variables: patchyard_managed_group, patchyard_controller.
 - name: Patch managed machines
-  hosts: "{{ fleet_managed_group | default('managed') }}"
+  hosts: "{{ patchyard_managed_group | default('managed') }}"
   serial: 1
   order: inventory
   max_fail_percentage: 0
@@ -20,33 +23,32 @@
   vars:
     reboot_ok: true
   tasks:
-    - name: Never the controller
-      ansible.builtin.assert:
-        that: inventory_hostname != (fleet_controller | default(''))
-        fail_msg: "{{ inventory_hostname }} runs the fleet tool; it is not patched by it"
 
     - name: Skip manual-only machines unless picked by name
       when:
-        - fleet_manual_only is defined and fleet_manual_only is not false
-        - not (fleet_explicit | default(false) | bool)
+        - patchyard_manual_only is defined and patchyard_manual_only is not false
+        - not (patchyard_explicit | default(false) | bool)
       block:
         - name: Manual-only machine skipped
           ansible.builtin.debug:
             msg: >-
-              SKIPPED (manual only: {{ fleet_manual_only.reason | default('no reason given')
-              if fleet_manual_only is mapping else 'set in inventory' }}); pick it by name to patch it
+              SKIPPED (manual only: {{ patchyard_manual_only.reason | default('no reason given')
+              if patchyard_manual_only is mapping else 'set in inventory' }}); pick it by name to patch it
         - name: End host
           ansible.builtin.meta: end_host
 
     - name: Containers running before
+      when: ansible_facts['os_family'] != 'Windows'
       ansible.builtin.shell: >-
         command -v docker >/dev/null && docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort || true
       register: before
       changed_when: false
       check_mode: false
 
+    # ---------------------------------------------------------------- install updates
+    # Windows facts have no pkg_mgr, so each Linux/BSD condition checks os_family first.
     - name: Upgrade packages (apt)
-      when: ansible_facts['pkg_mgr'] == 'apt'
+      when: ansible_facts['os_family'] != 'Windows' and ansible_facts['pkg_mgr'] == 'apt'
       ansible.builtin.apt:
         update_cache: true
         upgrade: dist
@@ -54,34 +56,121 @@
       register: upgrade_apt
 
     - name: Upgrade packages (dnf)
-      when: ansible_facts['pkg_mgr'] in ['dnf', 'dnf5']
+      when: ansible_facts['os_family'] != 'Windows' and ansible_facts['pkg_mgr'] in ['dnf', 'dnf5', 'yum']
       ansible.builtin.dnf:
         name: "*"
         state: latest
       register: upgrade_dnf
 
-    - name: Reboot required?
+    - name: Upgrade packages (zypper, pacman, apk, pkg)
+      when: ansible_facts['os_family'] != 'Windows' and ansible_facts['pkg_mgr'] in ['zypper', 'pacman', 'apk', 'pkgng']
+      ansible.builtin.command:
+        argv: "{{ {'zypper': ['zypper', '--non-interactive', 'update'],
+                   'pacman': ['pacman', '-Syu', '--noconfirm'],
+                   'apk': ['apk', 'upgrade', '--update-cache'],
+                   'pkgng': ['pkg', 'upgrade', '-y']}[ansible_facts['pkg_mgr']] }}"
+      register: upgrade_other
+      changed_when: upgrade_other.stdout is search('(?i)\\b(upgrading|installing|upgraded|reinstalling)\\b')
+
+    - name: Install updates (Windows; never reboots here)
+      when: ansible_facts['os_family'] == 'Windows'
+      ansible.windows.win_updates:
+        state: installed
+        category_names: "{{ patchyard_windows_update_categories | default(['Critical Updates', 'Security Updates',
+                            'Update Rollups', 'Updates', 'Definition Updates']) }}"
+        skip_optional: true   # previews Microsoft marks optional wait for the monthly release
+        reboot: false
+      register: upgrade_win
+
+    - name: Windows updates (installed, failed, left out)
+      when: ansible_facts['os_family'] == 'Windows'
+      vars:
+        found: "{{ (upgrade_win.updates | default({})).values() | list }}"
+        skipped: "{{ (upgrade_win.filtered_updates | default({})).values() | list }}"
+      ansible.builtin.debug:
+        msg: >-
+          {{ (found | selectattr('installed') | map(attribute='title') | map('regex_replace', '^', 'installed: ') | list)
+             + (found | rejectattr('installed') | map(attribute='title')
+                | zip(found | rejectattr('installed') | map(attribute='failure_msg', default='no reason given'))
+                | map('join', ' -- ') | map('regex_replace', '^', 'FAILED: ') | list)
+             + (skipped | map(attribute='title')
+                | zip(skipped | map(attribute='categories', default=[]) | map('join', ', '),
+                      skipped | map(attribute='filtered_reasons', default=[]) | map('join', ', ')
+                      | map('replace', 'category_names', 'category not selected') | map('replace', 'skip_optional', 'optional'))
+                | map('join', ' | ') | map('regex_replace', '^', 'left out: ') | list)
+             or ['nothing to install'] }}
+
+    # macOS: everything Software Update installs unattended, then Homebrew as its owner (it refuses
+    # root). On Apple silicon, macOS system updates need the owner's password: they are reported,
+    # not forced.
+    - name: Install updates (macOS)
+      when: ansible_facts['os_family'] == 'Darwin'
+      ansible.builtin.shell: softwareupdate --install --all --agree-to-license 2>&1; echo "rc=$?"
+      register: upgrade_mac
+      changed_when: upgrade_mac.stdout is search('(?i)(^Done|installed|downloaded)')
+
+    - name: macOS updates that wait for the owner
+      when: ansible_facts['os_family'] == 'Darwin' and upgrade_mac.stdout is search('(?i)(password|authenticat|credential)')
+      ansible.builtin.debug:
+        msg: >-
+          macOS asks for the owner's password for system updates on this Mac: install them in System Settings >
+          General > Software Update. Security responses and system data files still install by themselves.
+
+    - name: Homebrew packages (macOS, as Homebrew's owner)
+      when: ansible_facts['os_family'] == 'Darwin'
       ansible.builtin.shell: |
-        if [ -e /var/run/reboot-required ]; then echo yes
+        for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+          [ -x "$b" ] || continue
+          o=$(stat -f %Su "$(dirname "$(dirname "$b")")")
+          sudo -u "$o" -H "$b" update --quiet && sudo -u "$o" -H "$b" upgrade
+          exit $?
+        done
+        echo "no Homebrew"
+      register: upgrade_brew
+      changed_when: upgrade_brew.stdout is search('(?m)^==> (Upgrading|Pouring)')
+
+    # ---------------------------------------------------------------- reboot?
+    - name: Reboot required?
+      when: ansible_facts['os_family'] != 'Windows'
+      ansible.builtin.shell: |
+        modules_gone() { [ -d /usr/lib/modules ] && [ ! -d "/usr/lib/modules/$(uname -r)" ] || \
+                         { [ -d /lib/modules ] && [ ! -d "/lib/modules/$(uname -r)" ]; }; }
+        if [ -e /var/run/reboot-required ] || [ -e /run/reboot-needed ]; then echo yes
         elif command -v dnf >/dev/null && ! dnf needs-restarting -r >/dev/null 2>&1; then echo yes
+        elif command -v freebsd-version >/dev/null && [ "$(freebsd-version -k)" != "$(uname -r)" ]; then echo yes
+        elif modules_gone; then echo yes
         else echo no; fi
-      register: reboot_flag
+      register: reboot_unix
       changed_when: false
 
-    - name: Inside the reboot blackout?
+    - name: Reboot required? (Windows)
+      when: ansible_facts['os_family'] == 'Windows'
       ansible.builtin.set_fact:
-        blackout: >-
-          {{ (now(utc=true).hour | int) in
-             ((fleet_reboot_blackout | default({})).hours_utc | default([])) }}
+        reboot_unix: {stdout: "{{ 'yes' if upgrade_win.reboot_required | default(false) else 'no' }}"}
+
+    - name: Reboot needed?
+      ansible.builtin.set_fact:
+        reboot_flag: "{{ {'stdout': 'yes'} if (upgrade_mac.stdout | default('')) is search('(?i)restart') else reboot_unix }}"
+
+    - name: Inside the no-reboot window?
+      ansible.builtin.include_tasks: tasks/blackout.yml
 
     - name: Reboot
-      when: reboot_flag.stdout == 'yes' and reboot_ok | bool and not blackout | bool
+      when: reboot_flag.stdout == 'yes' and reboot_ok | bool and not blackout | bool and ansible_facts['os_family'] != 'Windows'
+            and inventory_hostname != (patchyard_controller | default(''))
       ansible.builtin.reboot:
         reboot_timeout: 900
-        msg: "Reboot after patching (ansiblefleet)"
+        msg: "Reboot after patching (Patchyard)"
+
+    - name: Reboot (Windows)
+      when: reboot_flag.stdout == 'yes' and reboot_ok | bool and not blackout | bool and ansible_facts['os_family'] == 'Windows'
+            and inventory_hostname != (patchyard_controller | default(''))
+      ansible.windows.win_reboot:
+        reboot_timeout: 1800
+        msg: "Reboot after patching (Patchyard)"
 
     - name: Wait for containers to come back
-      when: before.stdout | length > 0
+      when: ansible_facts['os_family'] != 'Windows' and before.stdout | default('') | length > 0
       ansible.builtin.shell: docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort
       register: after
       until: (before.stdout_lines | difference(after.stdout_lines)) | length == 0
@@ -92,10 +181,15 @@
     - name: Result
       ansible.builtin.debug:
         msg: >-
-          upgraded={{ (upgrade_apt.changed | default(false)) or (upgrade_dnf.changed | default(false)) }} |
+          upgraded={{ [upgrade_apt, upgrade_dnf, upgrade_other, upgrade_win, upgrade_mac, upgrade_brew]
+                      | selectattr('changed', 'defined')
+                      | selectattr('changed') | list | length > 0 }} |
           reboot_needed={{ reboot_flag.stdout }} |
-          {{ ('REBOOT DEFERRED (blackout: ' ~ fleet_reboot_blackout.reason | default('') ~ ')')
+          {{ 'REBOOT NEEDED (it runs Patchyard: reboot it on its own)'
+               if (reboot_flag.stdout == 'yes' and inventory_hostname == (patchyard_controller | default('')))
+             else ('REBOOT DEFERRED (no-reboot window ' ~ blackout_text ~ ((': ' ~ patchyard_reboot_blackout.reason)
+                if patchyard_reboot_blackout.reason | default('') else '') ~ ')')
              if (reboot_flag.stdout == 'yes' and blackout | bool)
              else 'REBOOT SKIPPED (reboot_ok=false)' if (reboot_flag.stdout == 'yes' and not reboot_ok | bool)
              else 'rebooted' if reboot_flag.stdout == 'yes' else 'no reboot' }} |
-          containers back: {{ before.stdout_lines | length }}
+          containers back: {{ (before.stdout_lines | default([])) | length }}

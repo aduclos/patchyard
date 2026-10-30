@@ -1,6 +1,6 @@
 import unittest
 
-from fleet import auth
+from patchyard import auth
 from tests.helpers import make_config
 
 

@@ -1,41 +1,54 @@
 # Reboot managed machines one at a time and wait for their containers to return.
 #   ansible-playbook reboot.yml --limit web1
-#   ... -e ignore_blackout=true     reboot even inside the machine's fleet_reboot_blackout
-# Engine variables: fleet_managed_group, fleet_controller (never rebooted here).
+#   ... -e ignore_blackout=true     reboot even inside the machine's patchyard_reboot_blackout
+# Engine variables: patchyard_managed_group, patchyard_controller (never rebooted here).
 - name: Reboot managed machines
-  hosts: "{{ fleet_managed_group | default('managed') }}"
+  hosts: "{{ patchyard_managed_group | default('managed') }}"
   serial: 1
   order: inventory
   max_fail_percentage: 0
   become: true
   tasks:
-    - name: Never the controller
-      ansible.builtin.assert:
-        that: inventory_hostname != (fleet_controller | default(''))
-        fail_msg: "{{ inventory_hostname }} runs the fleet tool; reboot it from its own console"
+    - name: Not the machine Patchyard runs on (rebooting it would end this run; it reboots on its own)
+      when: inventory_hostname == (patchyard_controller | default(''))
+      block:
+        - name: Skipped
+          ansible.builtin.debug:
+            msg: "{{ inventory_hostname }} runs Patchyard: reboot it on its own from the dashboard"
+        - name: End host
+          ansible.builtin.meta: end_host
 
-    - name: Outside the reboot blackout (unless overridden)
-      vars:
-        hours: "{{ (fleet_reboot_blackout | default({})).hours_utc | default([]) }}"
+    - name: Inside the no-reboot window?
+      ansible.builtin.include_tasks: tasks/blackout.yml
+
+    - name: Outside the no-reboot window (unless overridden)
       ansible.builtin.assert:
-        that: (ignore_blackout | default(false) | bool) or (now(utc=true).hour | int) not in hours
+        that: (ignore_blackout | default(false) | bool) or not (blackout | bool)
         fail_msg: >-
-          {{ inventory_hostname }} is in its reboot blackout (UTC hours {{ hours }}:
-          {{ fleet_reboot_blackout.reason | default('no reason given') }}); override to reboot anyway
+          {{ inventory_hostname }} is in its no-reboot window ({{ blackout_text }}:
+          {{ patchyard_reboot_blackout.reason | default('no reason given') }}); override to reboot anyway
 
     - name: Containers running before
+      when: ansible_facts['os_family'] != 'Windows'
       ansible.builtin.shell: >-
         command -v docker >/dev/null && docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort || true
       register: before
       changed_when: false
 
     - name: Reboot
+      when: ansible_facts['os_family'] != 'Windows'
       ansible.builtin.reboot:
         reboot_timeout: 900
-        msg: "Reboot requested from ansiblefleet"
+        msg: "Reboot requested from Patchyard"
+
+    - name: Reboot (Windows)
+      when: ansible_facts['os_family'] == 'Windows'
+      ansible.windows.win_reboot:
+        reboot_timeout: 1800
+        msg: "Reboot requested from Patchyard"
 
     - name: Wait for containers to come back
-      when: before.stdout | length > 0
+      when: ansible_facts['os_family'] != 'Windows' and before.stdout | default('') | length > 0
       ansible.builtin.shell: docker ps --format '{% raw %}{{.Names}}{% endraw %}' | sort
       register: after
       until: (before.stdout_lines | difference(after.stdout_lines)) | length == 0
@@ -45,4 +58,4 @@
 
     - name: Result
       ansible.builtin.debug:
-        msg: "rebooted | containers back: {{ before.stdout_lines | length }}"
+        msg: "rebooted | containers back: {{ (before.stdout_lines | default([])) | length }}"

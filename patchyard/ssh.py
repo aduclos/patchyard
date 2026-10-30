@@ -13,6 +13,10 @@ import subprocess
 from .config import Config
 
 FAMILY = {"inet": "inet", "inet6": "inet6", "any": "any"}
+# ssh-keyscan reads no ssh_config, so the address family goes on its command line.
+KEYSCAN_FAMILY = {"inet": ["-4"], "inet6": ["-6"], "any": []}
+SOCKET_FAMILY = {"inet": socket.AF_INET, "inet6": socket.AF_INET6, "any": socket.AF_UNSPEC}
+FAMILY_NAME = {"inet": "IPv4", "inet6": "IPv6", "any": "IPv4 or IPv6"}
 
 
 def base(cfg: Config, *, batch: bool = True) -> list[str]:
@@ -51,8 +55,18 @@ def allowed_sources(cfg: Config) -> list[str]:
     return cfg.service_account.allowed_sources or controller_ipv4()
 
 
-def resolves(host: str) -> str | None:
+def keyscan(cfg: Config, host: str) -> list[str]:
+    """Host-key scan over the same address family as every other connection.
+
+    Without it, a name with both records (Windows registers its IPv6 address in AD DNS)
+    is scanned over IPv6, which the machine's firewall and from= admit no one on.
+    """
+    return ["ssh-keyscan", *KEYSCAN_FAMILY[cfg.service_account.address_family],
+            "-T", "8", "-t", "ed25519,ecdsa,rsa", host]
+
+
+def resolves(host: str, family: str = "any") -> str | None:
     try:
-        return socket.gethostbyname(host)
-    except OSError:
+        return socket.getaddrinfo(host, 22, SOCKET_FAMILY[family], socket.SOCK_STREAM)[0][4][0]
+    except (OSError, IndexError):
         return None

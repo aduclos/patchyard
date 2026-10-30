@@ -1,83 +1,88 @@
-# Install (or update) the ansiblefleet controller on the machine you run this on.
+# Install (or update) the Patchyard controller on the machine you run this on.
 #
 #   sudo ansible-playbook install/controller.yml                   # defaults below
-#   sudo ansible-playbook install/controller.yml -e fleet_account=svc_fleet -e fleet_web_bind=192.0.2.5
+#   sudo ansible-playbook install/controller.yml -e patchyard_account=patchyard -e patchyard_controller_reboot=true
 #
-# Idempotent. Creates:
-#   * system group {{ fleet_group }} and system user {{ fleet_account }} (no password, no login shell)
-#   * its SSH key ~{{ fleet_account }}/.ssh/fleet_ed25519 and an ssh config that uses the state
+# Idempotent. When it finishes it prints the dashboard address and a one-time setup code:
+# the first-run wizard in the browser does the rest (site, sign-in, alerts).
+# Creates:
+#   * system group {{ patchyard_group }} and system user {{ patchyard_account }} (no password, no login shell)
+#   * its SSH key ~{{ patchyard_account }}/.ssh/patchyard_ed25519 and an ssh config that uses the state
 #     directory's known_hosts/config (shared with the web service and Ansible)
-#   * {{ fleet_state }} (inventory, host_vars, logs, data) owned by the service account
+#   * {{ patchyard_state }} (inventory, host_vars, logs, data) owned by the service account
 #   * the Ansible virtualenv and collections inside the code directory
-#   * {{ fleet_config }} from config/fleet.example.toml, ONLY if it does not exist
-#   * systemd units: ansiblefleet-web.service, ansiblefleet-check.service + .timer
-#   * optionally a sudo rule letting the service account reboot this machine (fleet_controller_reboot)
-# Then edit {{ fleet_config }}, put machines in {{ fleet_state }}/inventory.ini (or use
-# "Add machine" in the web UI), and: systemctl enable --now ansiblefleet-web ansiblefleet-check.timer
-- name: Install the ansiblefleet controller
+#   * systemd units: patchyard-web.service, patchyard-check.service + .timer
+#   * /usr/local/bin/patchyard, the command line (user/token management, checks, config)
+#   * optionally a sudo rule letting the service account reboot this machine (patchyard_controller_reboot)
+# Then edit {{ patchyard_config }}, put machines in {{ patchyard_state }}/inventory.ini (or use
+# "Add machine" in the web UI), and: systemctl enable --now Patchyard-web patchyard-check.timer
+- name: Install the Patchyard controller
   hosts: localhost
   connection: local
   become: true
   vars:
-    fleet_code: "{{ playbook_dir | dirname }}"          # this repository
-    fleet_state: /var/lib/ansiblefleet
-    fleet_config: /etc/ansiblefleet/fleet.toml
-    fleet_account: svc_fleet
-    fleet_group: fleet
-    fleet_admins: []                                     # local users who may read/edit state (added to fleet_group)
-    fleet_controller_reboot: false                       # sudo rule for the controller reboot button
-    fleet_python: /usr/bin/python3
-    fleet_home: "/home/{{ fleet_account }}"
+    patchyard_code: "{{ playbook_dir | dirname }}"          # this repository
+    patchyard_state: /var/lib/patchyard
+    patchyard_config: "{{ patchyard_state }}/patchyard.toml"   # written by the setup wizard
+    patchyard_config_file: ""                            # or: a ready-made config to install instead
+    patchyard_setup_bind: 0.0.0.0                        # where the first-run wizard listens
+    patchyard_setup_port: 8790
+    patchyard_account: patchyard
+    patchyard_group: patchyard
+    patchyard_admins: []                                     # local users who may read/edit state (added to patchyard_group)
+    patchyard_controller_reboot: false                       # sudo rule for the controller reboot button
+    patchyard_python: /usr/bin/python3
+    patchyard_home: "/home/{{ patchyard_account }}"
   tasks:
     - name: Python 3.11+ (tomllib)
-      ansible.builtin.command: "{{ fleet_python }} -c 'import sys; assert sys.version_info >= (3, 11)'"
+      ansible.builtin.command: "{{ patchyard_python }} -c 'import sys; assert sys.version_info >= (3, 11)'"
       changed_when: false
 
     - name: Group
       ansible.builtin.group:
-        name: "{{ fleet_group }}"
+        name: "{{ patchyard_group }}"
         system: true
 
     - name: Service account
       ansible.builtin.user:
-        name: "{{ fleet_account }}"
+        name: "{{ patchyard_account }}"
         system: true
-        home: "{{ fleet_home }}"
+        home: "{{ patchyard_home }}"
         create_home: true
         shell: /sbin/nologin
         password: "*"
-        groups: "{{ fleet_group }}"
+        groups: "{{ patchyard_group }}"
         append: true
-        comment: ansiblefleet service account
+        comment: Patchyard service account
 
     - name: Admins may read and edit the state
       ansible.builtin.user:
         name: "{{ item }}"
-        groups: "{{ fleet_group }}"
+        groups: "{{ patchyard_group }}"
         append: true
-      loop: "{{ fleet_admins }}"
+      loop: "{{ patchyard_admins }}"
 
     - name: Home and ~/.ssh are private
       ansible.builtin.file:
         path: "{{ item }}"
         state: directory
-        owner: "{{ fleet_account }}"
-        group: "{{ fleet_account }}"
+        owner: "{{ patchyard_account }}"
+        group: "{{ patchyard_account }}"
         mode: "0700"
-      loop: ["{{ fleet_home }}", "{{ fleet_home }}/.ssh"]
+      loop: ["{{ patchyard_home }}", "{{ patchyard_home }}/.ssh"]
 
     - name: SSH key
-      become_user: "{{ fleet_account }}"
+      become_user: "{{ patchyard_account }}"
       ansible.builtin.command:
-        cmd: ssh-keygen -q -t ed25519 -N '' -C "{{ fleet_account }}@{{ ansible_facts['hostname'] | default('controller') }}" -f {{ fleet_home }}/.ssh/fleet_ed25519
-        creates: "{{ fleet_home }}/.ssh/fleet_ed25519"
+        cmd: ssh-keygen -q -t ed25519 -N '' -C "{{ patchyard_account }}@{{ ansible_facts['hostname'] | default('controller') }}" -f {{ patchyard_home }}/.ssh/patchyard_ed25519
+        creates: "{{ patchyard_home }}/.ssh/patchyard_ed25519"
 
     - name: State directories
       ansible.builtin.file:
-        path: "{{ fleet_state }}/{{ item.path }}"
+        path: "{{ patchyard_state }}/{{ item.path }}"
         state: directory
-        owner: "{{ fleet_account }}"
-        group: "{{ fleet_group }}"
+        owner: "{{ patchyard_account }}"
+        group: "{{ patchyard_group }}"
         mode: "{{ item.mode }}"
       loop:
         - {path: "", mode: "2770"}
@@ -89,35 +94,35 @@
 
     - name: Shared known_hosts (group-writable so admins can record host keys)
       ansible.builtin.copy:
-        dest: "{{ fleet_state }}/ssh/known_hosts"
+        dest: "{{ patchyard_state }}/ssh/known_hosts"
         content: ""
         force: false
-        owner: "{{ fleet_account }}"
-        group: "{{ fleet_group }}"
+        owner: "{{ patchyard_account }}"
+        group: "{{ patchyard_group }}"
         mode: "0664"
 
     - name: Per-machine ssh settings (ssh refuses an included config others can write)
       ansible.builtin.copy:
-        dest: "{{ fleet_state }}/ssh/config"
+        dest: "{{ patchyard_state }}/ssh/config"
         content: "# Machine-specific ssh settings for the service account (Host / HostName blocks).\n"
         force: false
-        owner: "{{ fleet_account }}"
-        group: "{{ fleet_group }}"
+        owner: "{{ patchyard_account }}"
+        group: "{{ patchyard_group }}"
         mode: "0644"
 
     - name: Service account ssh config
       ansible.builtin.copy:
-        dest: "{{ fleet_home }}/.ssh/config"
-        owner: "{{ fleet_account }}"
-        group: "{{ fleet_account }}"
+        dest: "{{ patchyard_home }}/.ssh/config"
+        owner: "{{ patchyard_account }}"
+        group: "{{ patchyard_account }}"
         mode: "0600"
         content: |
-          # Written by ansiblefleet install/controller.yml.
-          Include {{ fleet_state }}/ssh/config
+          # Written by Patchyard install/controller.yml.
+          Include {{ patchyard_state }}/ssh/config
           Host *
-            UserKnownHostsFile {{ fleet_state }}/ssh/known_hosts
+            UserKnownHostsFile {{ patchyard_state }}/ssh/known_hosts
             StrictHostKeyChecking yes
-            IdentityFile {{ fleet_home }}/.ssh/fleet_ed25519
+            IdentityFile {{ patchyard_home }}/.ssh/patchyard_ed25519
             IdentitiesOnly yes
             # IPv4 keeps the key's from= restriction meaningful when IPv6 privacy addresses rotate;
             # match service_account.address_family in the site configuration.
@@ -125,10 +130,10 @@
 
     - name: Starter inventory (only if none exists)
       ansible.builtin.copy:
-        dest: "{{ fleet_state }}/inventory.ini"
+        dest: "{{ patchyard_state }}/inventory.ini"
         force: false
-        owner: "{{ fleet_account }}"
-        group: "{{ fleet_group }}"
+        owner: "{{ patchyard_account }}"
+        group: "{{ patchyard_group }}"
         mode: "0664"
         content: |
           # Machines the tool manages. "Add machine" in the web UI appends here.
@@ -138,66 +143,61 @@
           [report_only]
 
           [managed:vars]
-          ansible_user={{ fleet_account }}
-          ansible_ssh_private_key_file={{ fleet_home }}/.ssh/fleet_ed25519
+          ansible_user={{ patchyard_account }}
+          ansible_ssh_private_key_file={{ patchyard_home }}/.ssh/patchyard_ed25519
 
     - name: Ansible virtualenv
       ansible.builtin.pip:
-        requirements: "{{ fleet_code }}/ansible/requirements.txt"
-        virtualenv: "{{ fleet_code }}/ansible/.venv"
-        virtualenv_command: "{{ fleet_python }} -m venv"
+        requirements: "{{ patchyard_code }}/ansible/requirements.txt"
+        virtualenv: "{{ patchyard_code }}/ansible/.venv"
+        virtualenv_command: "{{ patchyard_python }} -m venv"
 
     - name: Ansible collections
       ansible.builtin.command:
         cmd: >-
-          {{ fleet_code }}/ansible/.venv/bin/ansible-galaxy collection install
-          -r {{ fleet_code }}/ansible/requirements.yml -p {{ fleet_code }}/ansible/collections
-        creates: "{{ fleet_code }}/ansible/collections/ansible_collections"
+          {{ patchyard_code }}/ansible/.venv/bin/ansible-galaxy collection install
+          -r {{ patchyard_code }}/ansible/requirements.yml -p {{ patchyard_code }}/ansible/collections
+        creates: "{{ patchyard_code }}/ansible/collections/ansible_collections"
 
     - name: Code is readable by the service account
       ansible.builtin.file:
-        path: "{{ fleet_code }}"
+        path: "{{ patchyard_code }}"
         mode: "o+rX"
         recurse: true
 
-    - name: Config directory
-      ansible.builtin.file:
-        path: "{{ fleet_config | dirname }}"
-        state: directory
-        owner: root
-        group: "{{ fleet_group }}"
-        mode: "0750"
-
-    - name: Site configuration from the example (never overwritten)
+    - name: Ready-made site configuration (optional; otherwise the setup wizard writes it)
+      when: patchyard_config_file | length > 0
       ansible.builtin.copy:
-        src: "{{ fleet_code }}/config/fleet.example.toml"
-        dest: "{{ fleet_config }}"
+        src: "{{ patchyard_config_file }}"
+        dest: "{{ patchyard_config }}"
         force: false
-        owner: root
-        group: "{{ fleet_group }}"
+        owner: "{{ patchyard_account }}"
+        group: "{{ patchyard_group }}"
         mode: "0640"
-      register: new_config
-
-    - name: Point the site configuration at this install (first install only)
-      when: new_config.changed
-      ansible.builtin.replace:
-        path: "{{ fleet_config }}"
-        regexp: '{{ item.re }}'
-        replace: '{{ item.to }}'
-      loop:
-        - {re: '^code = .*', to: 'code = "{{ fleet_code }}"'}
-        - {re: '^state = .*', to: 'state = "{{ fleet_state }}"'}
-        - {re: '^name = "svc_patch"', to: 'name = "{{ fleet_account }}"'}
 
     - name: Controller reboot rule (optional)
       ansible.builtin.copy:
-        dest: /etc/sudoers.d/ansiblefleet-controller
+        dest: /etc/sudoers.d/patchyard-controller
         mode: "0440"
         validate: visudo -cf %s
         content: |
-          # ansiblefleet: the service account may reboot this machine, nothing else.
-          {{ fleet_account }} ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
-      when: fleet_controller_reboot | bool
+          # Patchyard: the service account may reboot this machine, nothing else.
+          {{ patchyard_account }} ALL=(root) NOPASSWD: /usr/bin/systemctl reboot
+      when: patchyard_controller_reboot | bool
+
+    - name: patchyard command (runs as the service account, e.g. `sudo patchyard user add alice`)
+      ansible.builtin.copy:
+        dest: /usr/local/bin/patchyard
+        mode: "0755"
+        content: |
+          #!/bin/sh
+          # Patchyard command line; installed by install/controller.yml.
+          if [ "$(id -un)" != "{{ patchyard_account }}" ]; then
+              exec sudo -u "{{ patchyard_account }}" "$0" "$@"
+          fi
+          cd "{{ patchyard_code }}" || exit 1
+          export PATCHYARD_CONFIG="{{ patchyard_config }}" PATCHYARD_STATE="{{ patchyard_state }}" PATCHYARD_CODE="{{ patchyard_code }}"
+          exec "{{ patchyard_python }}" -m patchyard "$@"
 
     - name: systemd units
       ansible.builtin.copy:
@@ -205,43 +205,46 @@
         mode: "0644"
         content: "{{ item.content }}"
       loop:
-        - name: ansiblefleet-web.service
+        - name: patchyard-web.service
           content: |
             [Unit]
-            Description=ansiblefleet web app and API
+            Description=Patchyard web app and API
             After=network-online.target
             Wants=network-online.target
 
             [Service]
-            User={{ fleet_account }}
-            Group={{ fleet_group }}
+            User={{ patchyard_account }}
+            Group={{ patchyard_group }}
             UMask=0007
-            Environment=FLEET_CONFIG={{ fleet_config }} HOME={{ fleet_home }}
-            WorkingDirectory={{ fleet_code }}
+            Environment=PATCHYARD_CONFIG={{ patchyard_config }} PATCHYARD_STATE={{ patchyard_state }}
+            Environment=PATCHYARD_CODE={{ patchyard_code }} HOME={{ patchyard_home }}
+            Environment=PATCHYARD_SETUP_BIND={{ patchyard_setup_bind }} PATCHYARD_SETUP_PORT={{ patchyard_setup_port }}
+            WorkingDirectory={{ patchyard_code }}
             # Started via the interpreter: SELinux may not allow systemd to exec scripts in the code dir.
-            ExecStart={{ fleet_python }} -m fleet web
+            # Without a configuration it serves the first-run setup wizard.
+            ExecStart={{ patchyard_python }} -m patchyard web
             Restart=on-failure
             RestartSec=10
 
             [Install]
             WantedBy=multi-user.target
-        - name: ansiblefleet-check.service
+        - name: patchyard-check.service
           content: |
             [Unit]
-            Description=ansiblefleet status check (dashboard data + alerts)
+            Description=Patchyard status check (dashboard data + alerts)
 
             [Service]
             Type=oneshot
-            User={{ fleet_account }}
-            Group={{ fleet_group }}
+            User={{ patchyard_account }}
+            Group={{ patchyard_group }}
             UMask=0007
-            Environment=FLEET_CONFIG={{ fleet_config }} HOME={{ fleet_home }}
-            WorkingDirectory={{ fleet_code }}
-            ExecStart={{ fleet_python }} -m fleet check --if-due
-        - name: ansiblefleet-check.timer
+            Environment=PATCHYARD_CONFIG={{ patchyard_config }} PATCHYARD_STATE={{ patchyard_state }} HOME={{ patchyard_home }}
+            WorkingDirectory={{ patchyard_code }}
+            ExecStart={{ patchyard_python }} -m patchyard check --if-due
+        - name: patchyard-check.timer
           content: |
             [Unit]
-            Description=ansiblefleet status check every 5 min (the real interval is checks.interval_minutes)
+            Description=Patchyard status check every 5 min (the real interval is checks.interval_minutes)
 
             [Timer]
             OnBootSec=4min
@@ -251,13 +254,38 @@
             WantedBy=timers.target
       notify: reload systemd
 
-    - name: Next steps
+    - name: Start the web service and the check timer
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      loop: [patchyard-web.service, patchyard-check.timer]
+
+    - name: Configured already?
+      ansible.builtin.stat:
+        path: "{{ patchyard_config }}"
+      register: configured
+
+    - name: Setup code (the wizard creates it on first start)
+      when: not configured.stat.exists
+      ansible.builtin.wait_for:
+        path: "{{ patchyard_state }}/setup-token"
+        timeout: 30
+
+    - name: Read the setup code
+      when: not configured.stat.exists
+      ansible.builtin.slurp:
+        src: "{{ patchyard_state }}/setup-token"
+      register: setup_token
+
+    - name: Next step
       ansible.builtin.debug:
-        msg:
-          - "Service account key: {{ fleet_home }}/.ssh/fleet_ed25519.pub"
-          - "1. Edit {{ fleet_config }} (site.url, auth, notify, controller.host)"
-          - "2. Check it: sudo -u {{ fleet_account }} env FLEET_CONFIG={{ fleet_config }} {{ fleet_python }} -m fleet config"
-          - "3. systemctl enable --now ansiblefleet-web.service ansiblefleet-check.timer"
+        msg: "{{ ['Patchyard is running. Open http://' ~ (ansible_facts['default_ipv4']['address'] | default('<this machine>'))
+                  ~ ':' ~ patchyard_setup_port ~ '/ and enter the setup code: '
+                  ~ (setup_token.content | b64decode | trim)]
+                 if not configured.stat.exists else
+                 ['Patchyard is running with ' ~ patchyard_config ~ '. Sign in and use Add machine.'] }}"
 
   handlers:
     - name: reload systemd

@@ -1,17 +1,30 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "ansiblefleet"
+name = "patchyard"
 dynamic = ["version"]
-description = "Keep a fleet of machines updated with Ansible; reboots stay a person's call."
+description = "Patchyard: nobody should spend cumulative hours worrying about patching and updates across their network."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"          # tomllib
 dependencies = []                   # standard library only; Ansible runs in its own venv
 
+[project.scripts]
+patchyard = "patchyard.__main__:main"      # e.g. `patchyard mcp` on a laptop after pipx install
+
+[project.urls]
+Homepage = "https://github.com/aduclos/patchyard"
+
 [project.optional-dependencies]
 dev = ["ruff==0.14.0"]
 
+[tool.setuptools]
+packages = ["patchyard", "patchyard.devices"]
+
 [tool.setuptools.dynamic]
-version = { attr = "fleet.__version__" }
+version = { attr = "patchyard.__version__" }
 
 [tool.ruff]
 line-length = 120

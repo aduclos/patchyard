@@ -1,12 +1,12 @@
 """Sign-in: verify a person's password and that they belong to the configured group.
 
 Backends (config `auth.method`):
+  local     Patchyard's own accounts (patchyard/accounts.py); no domain or directory needed
   kerberos  password checked with kinit against `auth.realm` (into a throw-away
-            in-memory credential cache); works for Active Directory, FreeIPA, MIT KDCs
+            in-memory credential cache); works for Active Directory, FreeIPA, MIT KDCs.
+            Group membership is resolved through NSS (the same source `id` and
+            `getent` use), so AD via SSSD, LDAP via nslcd, and local groups all work.
   none      no sign-in at all; only for a trusted, single-user, local-only setup
-
-Group membership is resolved through NSS (the same source `id` and `getent`
-use), so AD via SSSD, LDAP via nslcd, and plain local groups all work.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from .accounts import Users
 from .config import Config
 
 USERNAME_RE = re.compile(r"^[a-z0-9_][a-z0-9_.-]{0,63}$")
@@ -101,6 +102,11 @@ class Authenticator:
         if wait:
             raise AuthError(f"too many failed sign-ins; try again in {int(wait // 60) + 1} min")
         user = normalize(username)
+        if self.cfg.auth.method == "local":
+            if not USERNAME_RE.match(user) or not password or not Users(self.cfg.state).verify(user, password):
+                self.limiter.fail()
+                raise AuthError("wrong username or password")
+            return user
         if not USERNAME_RE.match(user) or not password or not self._check_password(user, password):
             self.limiter.fail()
             raise AuthError("wrong username or password")
@@ -112,7 +118,7 @@ class Authenticator:
         return self._member(user, group or self.cfg.auth.group)
 
     def _kinit(self, user: str, password: str) -> bool:
-        env = dict(os.environ, KRB5CCNAME="MEMORY:ansiblefleet")
+        env = dict(os.environ, KRB5CCNAME="MEMORY:patchyard")
         try:
             r = subprocess.run(["kinit", f"{user}@{self.cfg.auth.realm}"], input=password + "\n",
                                capture_output=True, text=True, timeout=20, env=env)

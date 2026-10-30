@@ -1,7 +1,7 @@
 import unittest
 from unittest import mock
 
-from fleet import notify
+from patchyard import notify
 from tests.helpers import make_config
 
 
@@ -13,7 +13,7 @@ class NotifyTest(unittest.TestCase):
             raise OSError("down")
 
         backends = {"ntfy": broken, "webhook": lambda c, m: calls.append(m.title)}
-        with mock.patch.dict(notify.BACKENDS, backends), self.assertLogs("fleet.notify", "WARNING"):
+        with mock.patch.dict(notify.BACKENDS, backends), self.assertLogs("patchyard.notify", "WARNING"):
             failed = notify.send(cfg, notify.Message("t", "b"))
         self.assertEqual(failed, ["ntfy"])
         self.assertEqual(calls, ["t"])

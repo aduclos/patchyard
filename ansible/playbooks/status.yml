@@ -1,13 +1,13 @@
 # Read-only status of every machine in the inventory (no changes; sudo only for
-# listing containers). Writes <FLEET_STATE>/logs/status.json for the fleet check.
-# Run by the fleet check, not by hand.
+# listing containers). Writes <PATCHYARD_STATE>/logs/status.json for the check.
+# Run by `patchyard check`, not by hand.
 - name: Collect status
   hosts: all
   gather_facts: true
   become: false
   tasks:
     - name: apt state
-      when: ansible_facts['pkg_mgr'] == 'apt'
+      when: ansible_facts['os_family'] != 'Windows' and ansible_facts['pkg_mgr'] == 'apt'
       ansible.builtin.shell: |
         echo "pending=$(apt-get -s dist-upgrade 2>/dev/null | grep -c '^Inst')"
         echo "pending_pkgs=$(apt-get -s dist-upgrade 2>/dev/null | awk '/^Inst/{print $2}' | head -80 | paste -sd' ')"
@@ -17,7 +17,9 @@
         s=/var/lib/apt/periodic/upgrade-stamp
         echo "uu_last=$([ -e $s ] && stat -c %Y $s)"
         echo "uu_result=$(systemctl show -p Result --value apt-daily-upgrade.service)"
-        echo "uu_policy=$([ -e /etc/apt/apt.conf.d/52fleet-auto-updates ] && echo fleet || echo stock)"
+        # 52fleet-auto-updates: the old name of the policy file, until the policy is applied again
+        p=stock; for f in 52patchyard-auto-updates 52fleet-auto-updates; do [ -e /etc/apt/apt.conf.d/$f ] && p=patchyard; done
+        echo "uu_policy=$p"
         echo "dpkg_audit=$(dpkg --audit 2>/dev/null | grep -c . )"
         echo "release_upgrade=$(sed -n 's/^New release .\(.*\). available.*/\1/p' /var/lib/ubuntu-release-upgrader/release-upgrade-available 2>/dev/null)"
         pgrep -f 'ubuntu-release-upgrade[r]-' >/dev/null && echo "release_upgrading=1" || echo "release_upgrading="
@@ -29,12 +31,19 @@
       changed_when: false
 
     - name: dnf state
-      when: ansible_facts['pkg_mgr'] in ['dnf', 'dnf5']
+      when: ansible_facts['os_family'] != 'Windows' and ansible_facts['pkg_mgr'] in ['dnf', 'dnf5', 'yum']
       ansible.builtin.shell: |
-        echo "pending=$(dnf -C -q check-upgrade 2>/dev/null | grep -c '\S')"
-        echo "pending_pkgs=$(dnf -C -q check-upgrade 2>/dev/null | awk 'NF{print $1}' | head -80 | paste -sd' ')"
+        # Package lines only (name.arch first, not indented): dnf5 prints an "Upgrades" header even
+        # with -q, dnf4 an "Obsoleting Packages" section and indented lines for wrapped long names.
+        pk=$(dnf -C -q check-upgrade 2>/dev/null | awk '/^[^[:space:]]/ && $1 ~ /[.]/ {print $1}' | sort -u)
+        echo "pending=$(printf '%s' "$pk" | grep -c .)"
+        echo "pending_pkgs=$(printf '%s\n' "$pk" | head -80 | paste -sd' ')"
+        # "reboot needed since": the last package transaction (dnf4 or dnf5 history), else boot time
         if dnf needs-restarting -r >/dev/null 2>&1; then echo "reboot_since="
-        else echo "reboot_since=$(date -d "$(uptime -s)" +%s)"; fi
+        else
+          t=$(ls -t /usr/lib/sysimage/libdnf5/transaction_history.sqlite /var/lib/dnf/history.sqlite 2>/dev/null | head -1)
+          echo "reboot_since=$([ -n "$t" ] && stat -c %Y "$t" || date -d "$(uptime -s)" +%s)"
+        fi
         t=$(systemctl list-unit-files 'dnf*-automatic*.timer' --no-legend 2>/dev/null | awk '$2=="enabled"{print $1; exit}')
         if [ -n "$t" ]; then
           s=${t%.timer}.service
@@ -47,9 +56,95 @@
       register: dnf_state
       changed_when: false
 
+    # zypper (SUSE), pacman (Arch), apk (Alpine), pkg (FreeBSD). Read-only: uses the package
+    # indexes as they are (the automatic updates or a patch run refresh them).
+    - name: other package managers
+      when: ansible_facts['os_family'] != 'Windows' and ansible_facts['pkg_mgr'] in ['zypper', 'pacman', 'apk', 'pkgng']
+      environment:
+        PM: "{{ ansible_facts['pkg_mgr'] }}"
+      ansible.builtin.shell: |
+        boot=$(date -d "$(uptime -s 2>/dev/null)" +%s 2>/dev/null || sysctl -n kern.boottime 2>/dev/null | sed 's/.*sec = \([0-9]*\).*/\1/')
+        # a kernel newer than the running one is installed when its module directory is gone
+        modules_gone() { [ -d /usr/lib/modules ] && [ ! -d "/usr/lib/modules/$(uname -r)" ] || \
+                         { [ -d /lib/modules ] && [ ! -d "/lib/modules/$(uname -r)" ]; }; }
+        case "$PM" in
+          zypper)
+            echo "pending=$(zypper -q --non-interactive lu 2>/dev/null | grep -c '^v ')"
+            if [ -e /run/reboot-needed ] || [ -e /var/run/reboot-needed ]; then echo "reboot_since=$(stat -c %Y /run/reboot-needed 2>/dev/null || echo "$boot")"; else echo "reboot_since="; fi
+            systemctl is-enabled -q transactional-update.timer 2>/dev/null && echo "uu_policy=transactional-update" || echo "uu_policy=none" ;;
+          pacman)
+            if command -v checkupdates >/dev/null; then echo "pending=$(checkupdates 2>/dev/null | wc -l)"; else echo "pending="; fi
+            if modules_gone; then echo "reboot_since=$(stat -c %Y /var/log/pacman.log)"; else echo "reboot_since="; fi
+            echo "uu_policy=none" ;;
+          apk)
+            echo "pending=$(apk version -l '<' 2>/dev/null | tail -n +2 | grep -c .)"
+            if modules_gone; then echo "reboot_since=$(stat -c %Y /lib/apk/db/installed)"; else echo "reboot_since="; fi
+            echo "uu_policy=none" ;;
+          pkgng)
+            echo "pending=$(pkg version -ql '<' 2>/dev/null | grep -c .)"
+            if [ "$(freebsd-version -k 2>/dev/null)" != "$(uname -r)" ]; then echo "reboot_since=$(stat -f %m /boot/kernel/kernel)"; else echo "reboot_since="; fi
+            echo "uu_policy=none" ;;
+        esac
+      register: other_state
+      changed_when: false
+
+    # macOS: what Software Update offers (pending_titles: labels joined with |, they contain spaces) and whether
+    # Patchyard's policy is on (daily check and download, security responses and data files).
+    - name: macOS Software Update state
+      when: ansible_facts['os_family'] == 'Darwin'
+      ansible.builtin.shell: |
+        L=$(softwareupdate --list 2>&1)
+        echo "pending=$(echo "$L" | grep -c '^\* Label:')"
+        echo "pending_titles=$(echo "$L" | sed -n 's/^\* Label: //p' | head -20 | paste -sd'|' -)"
+        P=/Library/Preferences/com.apple.SoftwareUpdate
+        if [ "$(defaults read $P AutomaticDownload 2>/dev/null)" = 1 ] && [ "$(defaults read $P CriticalUpdateInstall 2>/dev/null)" = 1 ]
+        then echo "uu_policy=macos"; else echo "uu_policy=none"; fi
+        d=$(defaults read $P LastSuccessfulDate 2>/dev/null)
+        echo "uu_last=$([ -n "$d" ] && date -j -f '%Y-%m-%d %H:%M:%S %z' "$d" +%s 2>/dev/null)"
+        echo "uu_result="
+        echo "reboot_since="
+      register: mac_state
+      changed_when: false
+
+    - name: Windows Update state
+      when: ansible_facts['os_family'] == 'Windows'
+      block:
+        # The same selection as patch.yml, so "pending" is what Patch would install (and clears
+        # after it); the rest (drivers, feature upgrades, optional previews) is listed as left out.
+        - name: Search for updates (installs nothing)
+          ansible.windows.win_updates:
+            state: searched
+            category_names: "{{ patchyard_windows_update_categories | default(['Critical Updates', 'Security Updates',
+                                'Update Rollups', 'Updates', 'Definition Updates']) }}"
+            skip_optional: true
+          register: win_search
+        - name: Reboot pending?
+          ansible.windows.win_powershell:
+            script: |
+              $keys = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
+                      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
+              $Ansible.Result = [bool]($keys | Where-Object { Test-Path $_ })
+          register: win_reboot
+          changed_when: false
+        - name: Windows facts as status lines
+          vars:
+            win_left: "{{ (win_search.filtered_updates | default({})).values() | list }}"
+          ansible.builtin.set_fact:
+            win_lines:
+              - "pending={{ win_search.found_update_count | default(0) }}"
+              # titles contain spaces: joined with | (any | inside a title becomes /)
+              - "pending_titles={{ (win_search.updates | default({})).values() | map(attribute='title')
+                                   | map('replace', '|', '/') | list | join('|') | truncate(2000) }}"
+              - "left_out={% for u in win_left[:20] %}{{ u.title | replace('|', '/') }} ({{ 'optional'
+                  if 'skip_optional' in (u.filtered_reasons | default([u.filtered_reason | default('')]))
+                  else (u.categories | default([]) | join(', ')) }}){{ '' if loop.last else '|' }}{% endfor %}"
+              - "reboot_since={{ (win_reboot.result | default(false)) | ternary(ansible_facts['date_time']['epoch'], '') }}"
+              - "uu_policy=windows-update"
+
     # The service account is normally not in the docker group, so ask through
     # sudo -n first (passwordless on managed machines) and fall back to a plain call.
     - name: Containers running
+      when: ansible_facts['os_family'] != 'Windows'
       ansible.builtin.shell: |
         for e in docker podman; do
           command -v $e >/dev/null || continue
@@ -62,16 +157,19 @@
     - name: Status fact
       ansible.builtin.set_fact:
         st: >-
-          {{ dict((apt_state.stdout_lines | default([]) + dnf_state.stdout_lines | default([]))
+          {{ dict((apt_state.stdout_lines | default([]) + dnf_state.stdout_lines | default([])
+                   + other_state.stdout_lines | default([]) + mac_state.stdout_lines | default([])
+                   + win_lines | default([]))
                   | map('split', '=', 1) | list)
              | combine({'os': ansible_facts['distribution'] ~ ' ' ~ ansible_facts['distribution_version'],
                         'uptime_s': ansible_facts['uptime_seconds'],
-                        'containers': ctr.stdout_lines,
+                        'containers': ctr.stdout_lines | default([]),
                         'policy_vars': {
-                          'fleet_reboot_blackout': fleet_reboot_blackout | default(omit),
-                          'fleet_manual_only': fleet_manual_only | default(omit),
-                          'fleet_hold_packages': fleet_hold_packages | default(omit),
-                          'fleet_track_containers': fleet_track_containers | default(omit)},
+                          'patchyard_reboot_blackout': patchyard_reboot_blackout | default(omit),
+                          'patchyard_manual_only': patchyard_manual_only | default(omit),
+                          'patchyard_hold_packages': patchyard_hold_packages | default(omit),
+                          'patchyard_track_containers': patchyard_track_containers | default(omit),
+                          'patchyard_auto_updates': patchyard_auto_updates | default(omit)},
                         'groups': group_names}) }}
 
 - name: Write logs/status.json
@@ -81,7 +179,7 @@
   tasks:
     - name: Write
       ansible.builtin.copy:
-        dest: "{{ lookup('env', 'FLEET_STATE') | default('/var/lib/fleet', true) }}/logs/status.json"
+        dest: "{{ lookup('env', 'PATCHYARD_STATE') | default('/var/lib/patchyard', true) }}/logs/status.json"
         mode: "0600"
         content: >-
           {{ dict(groups['all'] | map('extract', hostvars) | selectattr('st', 'defined')

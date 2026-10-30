@@ -1,0 +1,41 @@
+# Daily install time for systemd-timer based automatic updates (apt, dnf-automatic).
+# vars: timers: [{name: <unit>.timer, offset_hours: <int>}]
+# patchyard_update_time ("HH:MM", the machine's local time) writes a drop-in per timer;
+# without it the drop-ins are removed and the system's own schedule applies again.
+# Sets update_time_changed so the caller restarts the timers.
+- name: Drop-in directory
+  when: patchyard_update_time | default('') | length > 0
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item.name }}.d"
+    state: directory
+    mode: "0755"
+  loop: "{{ timers }}"
+
+- name: Install time drop-in
+  vars:
+    t: "{{ patchyard_update_time | default('') }}"
+    hh: "{{ '%02d' % (((t[:2] | int) + (item.offset_hours | int) + 24) % 24) if t else '' }}"
+  ansible.builtin.copy:
+    dest: "/etc/systemd/system/{{ item.name }}.d/patchyard.conf"
+    mode: "0644"
+    content: |
+      # Managed by Patchyard (playbooks/auto-updates.yml, patchyard_update_time).
+      [Timer]
+      OnCalendar=
+      OnCalendar=*-*-* {{ hh }}:{{ t[3:5] }}:00
+      RandomizedDelaySec={{ patchyard_update_spread_minutes | default(30) | int }}m
+  when: t | length > 0
+  loop: "{{ timers }}"
+  register: time_set
+
+- name: Back to the system's schedule
+  when: patchyard_update_time | default('') | length == 0
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item.name }}.d/patchyard.conf"
+    state: absent
+  loop: "{{ timers }}"
+  register: time_cleared
+
+- name: Remember whether the timers need a restart
+  ansible.builtin.set_fact:
+    update_time_changed: "{{ (time_set.results | default([]) + time_cleared.results | default([])) | selectattr('changed', 'defined') | selectattr('changed') | list | length > 0 }}"

@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="112" height="112" role="img" aria-label="Patchyard">
+  <rect x="1.5" y="3.5" width="29" height="25" rx="6" fill="#161a26" stroke="#40b5ff" stroke-width="2"/>
+  <circle cx="6" cy="7.5" r="0.9" fill="#ff6b6b"/><circle cx="9" cy="7.5" r="0.9" fill="#ffc857"/><circle cx="12" cy="7.5" r="0.9" fill="#3ddc97"/>
+  <path d="M8 13l5 4-5 4" fill="none" stroke="#40b5ff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M15.5 22h8" stroke="#e7eaf2" stroke-width="2.6" stroke-linecap="round"/>
+</svg>

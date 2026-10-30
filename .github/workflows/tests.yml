@@ -1,0 +1,79 @@
+# Runs on every push and pull request: the unit tests (including the no-site-data guard),
+# the linter, an Ansible syntax check of every playbook, and parse checks of the bootstrap
+# scripts and the web UI. Actions are pinned to commit SHAs.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: unit tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (standard library only)
+        run: python -m unittest discover -t . -s tests -v
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.13"
+      - name: ruff (version pinned in pyproject.toml)
+        run: |
+          pip install "$(python -c 'import tomllib; print([d for d in tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["dev"] if d.startswith("ruff")][0])')"
+          ruff check patchyard tests
+
+  playbooks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: "3.13"
+      - name: Ansible and collections (the versions the installer uses)
+        working-directory: ansible
+        run: |
+          pip install -r requirements.txt
+          ansible-galaxy collection install -r requirements.yml -p ./collections
+      - name: Syntax check every playbook
+        working-directory: ansible
+        run: |
+          export PATCHYARD_STATE="$RUNNER_TEMP/state"
+          mkdir -p "$PATCHYARD_STATE" && printf '[managed]\n' > "$PATCHYARD_STATE/inventory.ini"
+          printf '{"all": {}}\n' > "$PATCHYARD_STATE/machine-settings.json"
+          for book in playbooks/*.yml; do ansible-playbook --syntax-check "$book"; done
+      - name: Machine settings as Ansible resolves them (the tests skipped without Ansible)
+        run: python -m unittest tests.test_machines -v
+
+  scripts:
+    name: bootstrap scripts and web UI
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      - name: bootstrap.sh parses (bash -n) and passes shellcheck
+        run: |
+          bash -n bootstrap/bootstrap.sh
+          shellcheck bootstrap/bootstrap.sh
+      - name: bootstrap.ps1 parses
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile("$PWD/bootstrap/bootstrap.ps1", [ref]$null, [ref]$errors)
+          if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      - name: Web UI scripts parse
+        run: for f in www/*.js; do node --check "$f"; done

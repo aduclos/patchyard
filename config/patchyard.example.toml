@@ -1,0 +1,134 @@
+# Patchyard: site configuration.
+# Copy to /etc/patchyard/patchyard.toml (or point PATCHYARD_CONFIG at it) and edit.
+# Every key is optional except where marked REQUIRED; defaults are shown.
+# A few keys can also be changed in the web UI (Settings); those changes are
+# saved to <paths.state>/settings.json and take precedence over this file.
+
+[site]
+name = "Patchyard"
+url = "https://patch.example.com"      # REQUIRED: the dashboard's URL (Origin check, links in alerts)
+domain = ""                            # appended to short names on enrollment, e.g. ".corp.example.com"
+
+[paths]
+code = "/srv/patchyard"                # this repository
+state = "/var/lib/patchyard"           # inventory, host_vars, logs, status data (owned by the service account)
+
+[service_account]
+name = "patchyard"                     # local account created on every managed machine
+key = "~/.ssh/patchyard_ed25519"       # its private key on the controller
+allowed_sources = []                   # IPs the key works from; [] = the controller's IPv4 addresses
+address_family = "inet"                # inet | inet6 | any
+
+[inventory]
+managed_group = "managed"              # Ansible group of machines the tool changes
+report_only_group = "report_only"      # shown, never changed
+
+[web]
+bind = "127.0.0.1"                     # put a reverse proxy in front, or bind a LAN address
+port = 8790
+session_hours = 8
+serve_static = true
+settings_locked = []                   # settings the web UI may not change, e.g. ["notify", "checks.digest_hour"];
+                                       # ["*"] keeps the whole configuration in this file
+
+[auth]
+# local:    Patchyard's own accounts (no domain needed); create them in the setup wizard,
+#           Settings > Users, or with: python -m patchyard user add NAME
+# kerberos: domain accounts (Active Directory, FreeIPA, MIT); needs realm + group
+# none:     no sign-in at all (only for a trusted, single-user, local-only setup)
+method = "local"
+realm = ""                             # kerberos only, e.g. "CORP.EXAMPLE.COM"
+group = "patchyard-admins"             # kerberos only: members may sign in (AD via SSSD, LDAP, or a local group)
+max_failures = 5
+failure_window_minutes = 15
+lockout_minutes = 15
+
+[checks]
+interval_minutes = 15
+stale_auto_update_hours = 48           # no successful automatic update for this long = warning
+container_memory_days = 3              # a container seen in this window and now gone = problem
+release_upgrade_idle_minutes = 15      # release upgrade with no log activity this long = "waiting for input"
+digest_hour = 9                        # daily reminder while something waits on you; -1 = off
+device_firmware_check_hours = 24       # how often [[devices]] are asked to look for new firmware
+
+[notify]
+backends = []                          # any of: "ntfy", "webhook", "smtp"
+
+[notify.ntfy]
+url = ""                               # e.g. "https://ntfy.sh"
+topic = ""
+token_file = ""                        # optional access token, read at send time
+
+[notify.webhook]
+url = ""                               # POSTed JSON: {"title", "body", "priority", "url"}
+
+[notify.smtp]
+host = ""
+port = 587
+starttls = true
+user = ""
+password_file = ""
+sender = ""
+recipients = []
+
+[controller]
+host = ""                              # inventory name of the machine running this tool (a machine like the rest,
+                                       # but never rebooted in the middle of a job)
+reboot_command = []                    # e.g. ["sudo", "-n", "/usr/bin/systemctl", "reboot"]; [] = no Reboot for it
+patch_command = []                     # patch it with this instead of the playbook (no root needed on it), e.g.
+                                       # ["sudo", "-n", "/usr/local/sbin/self-patch"]; it then keeps its own schedule
+status_plugin = ""                     # optional executable printing JSON status for the controller
+
+# Network devices patched through their own APIs (routers, firewalls, access points, NAS).
+# Usually added in the dashboard (Settings > Network devices, kept in <paths.state>/devices.json);
+# here, one [[devices]] table per device. A device defined here wins over one of the same name
+# added in the dashboard. Keys:
+#   name              shown on the dashboard; unique
+#   driver            one of the drivers below
+#   url               the device's web/API address, e.g. "https://192.0.2.1"
+#   credentials_file  JSON readable only by the service account (format per driver below)
+#   verify_tls        false only for a self-signed certificate (better: ca_file)
+#   ca_file           trust this CA bundle for the device
+#   disruption        shown before Update/Reboot, e.g. "Wi-Fi drops for 3 minutes"
+#   options           driver-specific settings (a table)
+#
+# Drivers and their credentials_file contents:
+#   opnsense   {"key": "...", "secret": "..."}      API key of a user whose only privilege is
+#                                                   "System: Firmware"
+#   fortigate  {"token": "..."}                     REST API admin key (System read/write); installs
+#                                                   patch releases, only reports a new major line
+#   asuswrt    {"username": "...", "password": "..."}  ASUS routers, mesh nodes, access points
+#   mikrotik   {"username": "...", "password": "..."}  RouterOS 7 user with read, write, reboot
+#   unifi      {"username": "...", "password": "..."}  local UniFi Network account; one entry per
+#              device, url = the controller; options: mac (required), site ("default"),
+#              unifi_os ("true" for UDM/Cloud Key Gen2+/UniFi OS Server, "false" for classic)
+#   truenas    {"api_key": "..."}                   SCALE and CORE
+#   synology   {"username": "...", "password": "..."}  DSM admin without two-factor sign-in;
+#              reports waiting updates and reboots (DSM installs its own updates)
+#   openwrt    {"username": "root", "password": "..."}  via rpcd/ubus; version and reboot
+#   omada_eap  {"username": "...", "password": "..."}  TP-Link Omada AP, standalone; version only
+#   homeassistant {"token": "..."}                  long-lived access token; Core, OS, add-ons and device
+#                                                   firmware updates (a backup first where supported)
+#   exec       no credentials needed; your own commands (see patchyard/devices/exec.py):
+#              options: status_command (required, prints JSON), update_command, reboot_command
+#
+# [[devices]]
+# name = "firewall"
+# driver = "opnsense"
+# url = "https://192.0.2.1"
+# credentials_file = "/var/lib/patchyard/secrets/firewall.json"
+# disruption = "everyone loses internet access for a few minutes"
+#
+# [[devices]]
+# name = "office-ap"
+# driver = "unifi"
+# url = "https://unifi.example.com"
+# credentials_file = "/var/lib/patchyard/secrets/unifi.json"
+# disruption = "office Wi-Fi drops for about 2 minutes"
+# options = { mac = "00:00:5e:00:53:01" }
+#
+# [[devices]]
+# name = "ups"
+# driver = "exec"
+# url = "https://ups.example.com"
+# options = { status_command = "/usr/local/bin/ups-firmware-status" }

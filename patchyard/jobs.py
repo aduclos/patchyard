@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
 
-from . import ssh
+from . import devices, ssh
 from .config import Config
 
 PLAYBOOKS = {
@@ -30,14 +30,15 @@ SINGLE_HOST = {"release-upgrade", "cancel-upgrade", "watch-upgrade", "enroll", "
 READ_ONLY = {"refresh", "watch-upgrade"}        # never block a machine
 
 # Follow a release upgrade's log over SSH until the upgrader exits. Upgrades started by
-# the tool log to fleet-release-upgrade.log; one started by hand only has main.log.
+# the tool log to patchyard-release-upgrade.log; one started by hand only has main.log.
 WATCH_SCRIPT = r"""
-F=/var/log/fleet-release-upgrade.log; M=/var/log/dist-upgrade/main.log
-if systemctl is-active -q fleet-release-upgrade || { [ -e $F ] && [ $F -nt $M ]; }; then L=$F; else L=$M; fi
+F=/var/log/patchyard-release-upgrade.log; M=/var/log/dist-upgrade/main.log
+if systemctl is-active -q patchyard-release-upgrade || { [ -e $F ] && [ $F -nt $M ]; }; then L=$F; else L=$M; fi
 echo "=== following $L on $(hostname)"
 tail -n {start} -F $L 2>/dev/null & T=$!
 sleep 3
-while pgrep -f 'ubuntu-release-upgrade[r]-' >/dev/null || systemctl is-active -q fleet-release-upgrade; do sleep 5; done
+while pgrep -f 'ubuntu-release-upgrade[r]-' >/dev/null || systemctl is-active -q patchyard-release-upgrade
+do sleep 5; done
 sleep 3; kill $T 2>/dev/null
 echo "=== the upgrader is no longer running"
 . /etc/os-release; echo "=== now: $PRETTY_NAME"
@@ -123,8 +124,8 @@ class JobManager:
 
     # ---------------------------------------------------------------- work units
     def engine_vars(self) -> list[str]:
-        return ["-e", f"fleet_managed_group={self.cfg.inventory.managed_group}",
-                "-e", f"fleet_controller={self.cfg.controller.host}"]
+        return ["-e", f"patchyard_managed_group={self.cfg.inventory.managed_group}",
+                "-e", f"patchyard_controller={self.cfg.controller.host}"]
 
     def playbook(self, log: IO[str], name: str, hosts: list[str], extra: list[str]) -> int:
         ansible = self.cfg.code / "ansible"
@@ -132,13 +133,13 @@ class JobManager:
                *self.engine_vars(), *extra]
         log.write(f"\n$ ansible-playbook {name} --limit {','.join(hosts)} {' '.join(extra)}\n")
         log.flush()
-        env = dict(os.environ, ANSIBLE_FORCE_COLOR="0", PYTHONUNBUFFERED="1", FLEET_STATE=str(self.cfg.state))
+        env = dict(os.environ, ANSIBLE_FORCE_COLOR="0", PYTHONUNBUFFERED="1", PATCHYARD_STATE=str(self.cfg.state))
         return subprocess.run(cmd, cwd=ansible, stdout=log, stderr=subprocess.STDOUT, env=env).returncode
 
     def check(self, log: IO[str], push: bool = True) -> int:
-        log.write("\n$ fleet check\n")
+        log.write("\n$ patchyard check\n")
         log.flush()
-        cmd = [sys.executable, "-m", "fleet", "check"] + ([] if push else ["--no-push"])
+        cmd = [sys.executable, "-m", "patchyard", "check"] + ([] if push else ["--no-push"])
         return subprocess.run(cmd, cwd=self.cfg.code, stdout=log, stderr=subprocess.STDOUT).returncode
 
     def watch_upgrade(self, log: IO[str], host: str, start: str = "60") -> int:
@@ -149,7 +150,7 @@ class JobManager:
 
     def upgrading(self, host: str) -> bool:
         r = ssh.run_as_service(self.cfg, host, "pgrep -f 'ubuntu-release-upgrade[r]-' >/dev/null || "
-                                               "systemctl is-active -q fleet-release-upgrade", timeout=30)
+                                               "systemctl is-active -q patchyard-release-upgrade", timeout=30)
         return r.returncode == 0
 
     def action(self, action: str, hosts: list[str], opts: dict[str, Any]) -> Callable[[IO[str]], int]:
@@ -160,19 +161,56 @@ class JobManager:
         elif action == "cancel-upgrade":
             extra += ["-e", "mode=cancel"]
         elif action == "patch":
-            # Picking machines by name in the UI is the explicit opt-in for fleet_manual_only.
-            extra += ["-e", f"reboot_ok={'true' if opts.get('reboot') else 'false'}", "-e", "fleet_explicit=true"]
+            # Picking machines by name in the UI is the explicit opt-in for patchyard_manual_only.
+            extra += ["-e", f"reboot_ok={'true' if opts.get('reboot') else 'false'}", "-e", "patchyard_explicit=true"]
         elif action == "reboot" and opts.get("force"):
             extra += ["-e", "ignore_blackout=true"]
 
+        ctl, cmd = self.cfg.controller.host, self.cfg.controller.patch_command
+        own = action == "patch" and ctl in hosts and bool(cmd)
+        others = [h for h in hosts if not (own and h == ctl)]
+
         def work(log: IO[str]) -> int:
-            rc = self.playbook(log, PLAYBOOKS[action], hosts, extra)
+            rc = self.playbook(log, PLAYBOOKS[action], others, extra) if others else 0
+            if own:                             # last, so it cannot interrupt the others
+                rc = self.patch_controller(log) or rc
             if action == "release-upgrade" and rc == 0:
                 log.write("\nUpgrade launched; it keeps running if this page or the service goes away.\n")
                 rc = self.watch_upgrade(log, hosts[0], "+1")
             self.check(log)
             return rc
         return work
+
+    def device_action(self, name: str, action: str) -> Callable[[IO[str]], int]:
+        """Work function for a device: check (look for firmware now), update, reboot."""
+        dev = next(d for d in self.cfg.devices if d.name == name)
+
+        def work(log: IO[str]) -> int:
+            try:
+                drv = devices.driver_for(dev)          # reads the credentials file: a DeviceError too
+                if action == "check":
+                    st = drv.status(check=True)
+                    log.write(f"{name}: {st.model} {st.version}; latest {st.latest or 'unknown'}; "
+                              f"update available: {st.update_available}\n")
+                    rc = 0
+                elif action == "update":
+                    rc = drv.update(log)
+                else:
+                    rc = drv.reboot(log)
+            except devices.DeviceError as e:
+                log.write(f"!! {name}: {e}\n")
+                rc = 1
+            self.check(log)
+            return rc
+        return work
+
+    def patch_controller(self, log: IO[str]) -> int:
+        cmd = self.cfg.controller.patch_command
+        log.write(f"\n$ {' '.join(cmd)}    (patches {self.cfg.controller.host}, the Patchyard server)\n")
+        log.flush()
+        rc = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode
+        log.write(f"{self.cfg.controller.host}: patch command finished rc={rc}\n")
+        return rc
 
     def reboot_controller(self, log: IO[str]) -> int:
         cmd = self.cfg.controller.reboot_command

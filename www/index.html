@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fleet Patching</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='8' fill='%233b6fe0'/><path d='M9 17l4.5 4.5L23 11' stroke='white' stroke-width='3.2' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<title>Patchyard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='1.5' y='3.5' width='29' height='25' rx='6' fill='%23161a26' stroke='%2340b5ff' stroke-width='2'/><path d='M8 12l5 4-5 4' fill='none' stroke='%2340b5ff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/><path d='M15.5 21h8' stroke='%23e7eaf2' stroke-width='2.6' stroke-linecap='round'/></svg>">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -13,27 +13,38 @@
   <!-- ===== sidebar ===== -->
   <aside class="side">
     <div class="brand">
-      <span class="logo" aria-hidden="true"></span>
-      <div><h1 id="site-name">Fleet patching</h1><p id="checked">Loading…</p></div>
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="1.5" y="3.5" width="29" height="25" rx="6"/>
+        <path class="logo-chev" d="M8 12l5 4-5 4"/>
+        <path class="logo-cur" d="M15.5 21h8"/>
+      </svg>
+      <div><h1 id="site-name">Patchyard</h1><p id="checked">Loading…</p></div>
     </div>
 
     <div class="side-btns">
-      <button class="btn" id="btn-refresh" type="button">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
-        Refresh
-      </button>
-      <button class="btn ghost" id="btn-enroll" type="button">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-        Add machine
-      </button>
+      <button class="btn" id="btn-enroll" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Add machine</button>
+      <button class="btn ghost icon-btn" id="btn-refresh" type="button" title="Check every machine now" aria-label="Refresh">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg></button>
     </div>
 
-    <nav class="nav" id="nav" aria-label="Filter machines">
-      <p class="side-h">Machines</p>
-      <button type="button" class="nav-item on" data-filter="all"><span class="ni-dot"></span>All machines<span class="ni-n" data-count="all"></span></button>
-      <button type="button" class="nav-item" data-filter="attention" style="--c:var(--fail)"><span class="ni-dot"></span>Need attention<span class="ni-n" data-count="attention"></span></button>
-      <button type="button" class="nav-item" data-filter="reboot" style="--c:var(--reboot)"><span class="ni-dot"></span>Reboot waiting<span class="ni-n" data-count="reboot"></span></button>
-      <button type="button" class="nav-item" data-filter="ok" style="--c:var(--ok)"><span class="ni-dot"></span>Up to date<span class="ni-n" data-count="ok"></span></button>
+    <nav class="nav" aria-label="Views">
+      <p class="side-h">Overview</p>
+      <button type="button" class="nav-item on" data-filter="all">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/></svg>
+        All<span class="ni-n" data-count="all"></span></button>
+      <button type="button" class="nav-item" data-filter="attention" style="--c:var(--fail)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>
+        Need attention<span class="ni-n" data-count="attention"></span></button>
+      <button type="button" class="nav-item" data-filter="reboot" style="--c:var(--reboot)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4"/></svg>
+        Waiting on you<span class="ni-n" data-count="reboot"></span></button>
+      <button type="button" class="nav-item" data-filter="ok" style="--c:var(--ok)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12l5 5 9-10"/></svg>
+        Up to date<span class="ni-n" data-count="ok"></span></button>
+      <button type="button" class="nav-item" data-filter="devices">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13a10 10 0 0 1 14 0M8.5 16.5a5 5 0 0 1 7 0M12 20h.01"/></svg>
+        Network devices<span class="ni-n" data-count="devices"></span></button>
     </nav>
 
     <div class="side-jobs">
@@ -42,43 +53,38 @@
     </div>
 
     <div class="side-foot">
-      <span class="console-state" id="console-state"><span class="dot"></span><span class="label">connecting</span></span>
-      <span class="who-wrap"><span id="who"></span>
+      <div class="who-row"><span class="avatar" id="avatar" aria-hidden="true"></span><span id="who"></span>
+        <span class="console-state" id="console-state" title="Whether the dashboard can start jobs right now"><span class="dot"></span><span class="label">connecting</span></span></div>
+      <div class="who-btns">
         <button class="btn sm link" id="btn-settings" type="button">Settings</button>
-        <button class="btn sm link" id="btn-logout" type="button">Sign out</button></span>
+        <button class="btn sm link" id="btn-logout" type="button">Sign out</button>
+      </div>
     </div>
   </aside>
 
-  <!-- ===== main: top (machines) / splitter / bottom (terminal) ===== -->
+  <!-- ===== main: workspace (cards + drawer) / splitter / terminal ===== -->
   <main class="main" id="main">
-    <section class="pane top-pane" aria-labelledby="view-title">
-      <header class="pane-head">
-        <div class="view">
-          <h2 id="view-title">All machines</h2>
-          <span class="muted" id="view-sub"></span>
-        </div>
+    <section class="pane top-pane">
+      <header class="topbar">
+        <label class="search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg>
+          <input type="search" id="q" placeholder="Search machines, OS, status…  ( / )" autocomplete="off" spellcheck="false">
+        </label>
         <div class="bulk" id="bulk" hidden>
           <span class="bulk-n" id="selcount"></span>
           <button class="btn sm" type="button" data-bulk="patch">Patch</button>
           <button class="btn sm" type="button" data-bulk="reboot">Reboot</button>
-          <button class="btn sm ghost" type="button" data-bulk="auto-updates">Apply auto-update policy</button>
-          <button class="btn sm link" type="button" id="sel-clear">Clear</button>
+          <button class="btn sm ghost" type="button" data-bulk="auto-updates">Auto-update policy</button>
+          <button class="btn sm link" id="sel-clear" type="button">Clear</button>
         </div>
       </header>
-      <div class="table-scroll">
-        <div class="table" role="table" aria-label="Machines">
-          <div class="tr th" role="row">
-            <span class="c-sel"><input type="checkbox" id="sel-all" aria-label="Select all"></span>
-            <span class="c-host">Machine</span>
-            <span class="c-status">Status</span>
-            <span class="c-upd">Auto-updates</span>
-            <span class="c-pend">Pending</span>
-            <span class="c-up">Uptime</span>
-            <span class="c-act"><span class="sr">Actions</span></span>
-          </div>
-          <div id="rows"></div>
+
+      <div class="workspace">
+        <div class="grid-scroll" id="grid-scroll">
+          <div class="view-head"><h2 id="view-title">All</h2><span class="muted" id="view-sub"></span></div>
+          <div id="cards"></div>
         </div>
-        <p class="hint">Machines install updates by themselves every morning. Nothing reboots unless you press Reboot.</p>
+        <aside class="drawer" id="drawer" aria-label="Details" hidden></aside>
       </div>
     </section>
 
@@ -117,7 +123,38 @@
   </form>
 </dialog>
 
+<dialog id="wiz" class="wiz" aria-labelledby="wiz-title">
+  <div class="wiz-in">
+    <header class="wiz-head">
+      <h3 id="wiz-title">Add a machine or device</h3>
+      <button class="icon" type="button" data-w="close" title="Close (Esc)" aria-label="Close">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="wiz-steps" id="wiz-steps"></div>
+    <div class="wiz-body" id="wiz-body"></div>
+    <footer class="wiz-foot" id="wiz-foot"></footer>
+  </div>
+</dialog>
+<section class="settings" id="settings" aria-label="Settings" hidden>
+  <aside class="set-nav">
+    <h2>Settings</h2>
+    <nav class="nav" id="set-nav" aria-label="Settings sections"></nav>
+  </aside>
+  <div class="set-main">
+    <header class="set-head">
+      <h3 id="set-title">Settings</h3>
+      <button class="icon" type="button" id="set-close" title="Close (Esc)" aria-label="Close settings">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="set-body" id="set-body"></div>
+  </div>
+</section>
 <div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="icons.js"></script>
 <script src="app.js"></script>
+<script src="settings.js"></script>
+<script src="machines.js"></script>
+<script src="devices.js"></script>
+<script src="enroll.js"></script>
 </body>
 </html>

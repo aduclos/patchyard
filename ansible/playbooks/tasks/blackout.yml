@@ -1,0 +1,28 @@
+# Sets `blackout` (true inside the machine's no-reboot window) and `blackout_text`.
+# Included by patch.yml and reboot.yml after facts are gathered.
+#
+# patchyard_reboot_blackout: {days, start, end, reason} in the machine's own local time
+# (an end before the start runs past midnight, belonging to the day it started), or the
+# older form {hours_utc: [...]}. Weekdays come from weekday_number (0 = Sunday), which
+# does not depend on the machine's language.
+- name: No-reboot window (the machine's local time)
+  vars:
+    b: "{{ patchyard_reboot_blackout | default({}, true) }}"
+    by_number: [sun, mon, tue, wed, thu, fri, sat]
+    n: "{{ ansible_facts['date_time']['weekday_number'] | int }}"
+    today: "{{ by_number[n | int] }}"
+    yesterday: "{{ by_number[(n | int + 6) % 7] }}"
+    now_hm: "{{ ansible_facts['date_time']['hour'] }}:{{ ansible_facts['date_time']['minute'] }}"
+    days: "{{ b.days | default(by_number) }}"
+  ansible.builtin.set_fact:
+    blackout: >-
+      {{ (b.hours_utc is defined and (now(utc=true).hour | int) in b.hours_utc)
+         or (b.start is defined and b.end is defined
+             and ((b.start < b.end and today in days and b.start <= now_hm and now_hm < b.end)
+                  or (b.start > b.end and ((today in days and now_hm >= b.start)
+                                           or (yesterday in days and now_hm < b.end))))) }}
+    blackout_text: >-
+      {{ ('UTC hours ' ~ (b.hours_utc | join(', '))) if b.hours_utc is defined
+         else (b.start ~ '-' ~ b.end ~ ' ' ~ ('every day' if days | length == 7 else 'on ' ~ (days | join(' ')))
+               ~ ', its local time') if b.start is defined
+         else '' }}

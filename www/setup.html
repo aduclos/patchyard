@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Set up Patchyard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='1.5' y='3.5' width='29' height='25' rx='6' fill='%23161a26' stroke='%2340b5ff' stroke-width='2'/><path d='M8 12l5 4-5 4' fill='none' stroke='%2340b5ff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/><path d='M15.5 21h8' stroke='%23e7eaf2' stroke-width='2.6' stroke-linecap='round'/></svg>">
+<link rel="stylesheet" href="app.css">
+<style>
+  body { overflow: auto; background: radial-gradient(circle at 30% 10%, #1f2638, var(--side) 60%); }
+  .wiz { max-width: 640px; margin: 0 auto; padding: 40px 16px 60px; }
+  .wiz-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 22px; }
+  .wiz-brand h1 { font-size: 20px; } .wiz-brand p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .steps { display: flex; gap: 6px; margin-bottom: 18px; }
+  .steps span { flex: 1; height: 4px; border-radius: 2px; background: var(--surface-3); }
+  .steps span.done { background: var(--accent); } .steps span.now { background: var(--fg); }
+  .wcard { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 26px;
+           box-shadow: 0 24px 60px rgba(0, 0, 0, .4); display: grid; gap: 16px; }
+  .wcard h2 { font-size: 18px; } .wcard .lead { color: var(--muted); margin: -8px 0 0; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+  .choice { display: grid; gap: 8px; }
+  .choice label { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: start; padding: 12px 14px;
+                  border: 1px solid var(--line); border-radius: 10px; background: var(--bg); cursor: pointer; }
+  .choice label:has(input:checked) { border-color: var(--accent); background: rgba(64, 181, 255, .08); }
+  .choice b { font-weight: 600; } .choice small { grid-column: 2; color: var(--muted); font-size: 12.5px; }
+  .choice input { margin-top: 3px; }
+  .nav { display: flex; justify-content: space-between; gap: 8px; margin-top: 4px; }
+  .note { font-size: 12.5px; color: var(--muted); }
+  .ok-msg { color: var(--ok); font-size: 13px; } .bad-msg { color: var(--fail); font-size: 13px; }
+  .review { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; font-size: 13.5px; }
+  .review dt { color: var(--muted); } .review dd { margin: 0; overflow-wrap: anywhere; }
+  .code-in { font: 600 20px var(--mono); letter-spacing: .08em; text-align: center; }
+  .sub { display: none; gap: 12px; } .sub.on { display: grid; }
+</style>
+</head>
+<body>
+<main class="wiz">
+  <div class="wiz-brand">
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect x="1.5" y="3.5" width="29" height="25" rx="6"/>
+      <path class="logo-chev" d="M8 12l5 4-5 4"/><path class="logo-cur" d="M15.5 21h8"/></svg>
+    <div><h1>Set up Patchyard</h1><p>Five minutes now, so patching never eats your evenings again.</p></div>
+  </div>
+  <div class="steps" id="steps" aria-hidden="true"></div>
+  <form class="wcard" id="card" onsubmit="return false" novalidate></form>
+</main>
+<script src="setup.js"></script>
+</body>
+</html>

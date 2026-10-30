@@ -3,6 +3,8 @@
 Examples must use documentation values only: IPv4 192.0.2.0/24, 198.51.100.0/24,
 203.0.113.0/24 (RFC 5737), IPv6 2001:db8::/32 (RFC 3849), and example.com/.net/.org
 (RFC 2606). This catches the common way site details leak into a shared code base.
+A line may opt out with the marker "site-data: ok" (for version numbers that look like
+addresses); keep such exceptions rare and obvious.
 """
 import ipaddress
 import re
@@ -15,7 +17,8 @@ DOC_V4 = [ipaddress.ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "
                                             "0.0.0.0/32")]
 DOC_V6 = ipaddress.ip_network("2001:db8::/32")
 ALLOWED_DOMAINS = ("example.com", "example.net", "example.org", "github.com", "ntfy.sh", "galaxy.ansible.com",
-                   "python.org", "ansible.com", "localhost", "opensource.org", "w3.org")
+                   "python.org", "ansible.com", "localhost", "opensource.org", "w3.org",
+                   "shields.io", "ko-fi.com", "modelcontextprotocol.io", "simpleicons.org")
 IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w.])")
 IPV6 = re.compile(r"(?<![\w:])((?:[0-9a-f]{1,4}:){2,7}[0-9a-f]{1,4})(?![\w:])", re.I)
 # TLDs that collide with code (.info, .app, .dev: log.info, cls.app) are left out on purpose.
@@ -39,6 +42,8 @@ class NoSiteDataTest(unittest.TestCase):
             if path.name == Path(__file__).name:
                 continue
             for n, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+                if "site-data: ok" in line:      # explicit, reviewed exception (e.g. a version number)
+                    continue
                 for ip in IPV4.findall(line):
                     try:
                         addr = ipaddress.ip_address(ip)

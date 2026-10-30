@@ -1,6 +1,6 @@
 """Alert delivery. Configured backends (config `notify.backends`) all receive every message.
 
-A failing backend is logged and skipped; it never stops the fleet check.
+A failing backend is logged and skipped; it never stops the check.
 """
 from __future__ import annotations
 
@@ -70,15 +70,22 @@ def send_smtp(cfg: Config, msg: Message) -> None:
 BACKENDS = {"ntfy": send_ntfy, "webhook": send_webhook, "smtp": send_smtp}
 
 
-def send(cfg: Config, msg: Message) -> list[str]:
-    """Deliver to every configured backend; returns the names that failed."""
+def send_each(cfg: Config, msg: Message) -> dict[str, str]:
+    """Deliver to every configured backend; returns {backend: "" if delivered, else the error}."""
     if msg.priority not in PRIORITIES:
         raise ValueError(f"priority must be one of {PRIORITIES}")
-    failed = []
+    result = {}
     for name in cfg.notify.backends:
         try:
             BACKENDS[name](cfg, msg)
+            result[name] = ""
         except Exception as e:   # one broken backend must not stop the others
             log.warning("notify via %s failed: %s", name, e)
-            failed.append(name)
-    return failed
+            reason = getattr(e, "reason", None)          # urllib wraps the useful part
+            result[name] = str(reason or e) or type(e).__name__
+    return result
+
+
+def send(cfg: Config, msg: Message) -> list[str]:
+    """Deliver to every configured backend; returns the names that failed."""
+    return [name for name, err in send_each(cfg, msg).items() if err]

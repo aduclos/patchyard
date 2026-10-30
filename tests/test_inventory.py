@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fleet import inventory
+from patchyard import inventory
 
 INI = """# managed by hand
 [managed]
